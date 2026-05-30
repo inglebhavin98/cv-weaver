@@ -1,0 +1,73 @@
+# Base RenderCV YAML file.
+# This file holds personal info, semi-static sections, and optional design/locale/settings.
+# The assembler adds dynamic sections (experience, projects, skills) to cv.sections.
+#
+# See: https://docs.rendercv.com/user_guide/structure_of_the_yaml_input_file/
+
+cv:
+  name: "Your Full Name"
+  location: "City, Country"
+  email: "you@example.com"
+  phone: "+1-234-567-8901"
+  website: "https://your-website.com"
+  social_networks:
+    - network: LinkedIn
+      username: your-linkedin-username
+    - network: GitHub
+      username: your-github-username
+
+  # Optional: one-line professional headline
+  headline: "Senior Software Engineer | Platform & Backend"
+
+  # Summary paragraph (optional, can be generated per-CV)
+  summary: |
+    A brief paragraph about your professional background.
+    Keep it domain-agnostic here; the customizer engine can tailor it later.
+
+  # Semi-static sections (included as-is by the assembler)
+  sections:
+    education:
+      - institution: "Example University"
+        area: "Computer Science"
+        degree: "MS"
+        location: "City, Country"
+        start_date: "2018-09"
+        end_date: "2020-05"
+        highlights:
+          - "GPA: 3.9/4.0"
+          - "Thesis on distributed systems"
+
+    publications:
+      - title: "Your Paper Title"
+        authors:
+          - "Your Name"
+          - "Co-Author Name"
+        doi: "10.1234/example"
+        date: "2024-06"
+        journal: "Example Conference (NeurIPS)"
+
+    patents:
+      - number: "US Patent 12,345,678 — Adaptive Quantization for Neural Network Inference on Edge Devices"
+
+    invited_talks:
+      - reversed_number: "Talk Title — Example Conf, City, Country (2024)"
+
+    honors:
+      - bullet: "Best Paper Award, Example Conference (2024)"
+
+# Optional: design customization (theme, colors, typography, etc.)
+# Remove this block to use RenderCV defaults.
+design:
+  theme: classic
+
+# Optional: locale settings
+# Remove this block to use RenderCV defaults.
+locale:
+  language: english
+
+# Optional: RenderCV settings (output paths, generation flags)
+# Remove this block to use RenderCV defaults.
+settings:
+  current_date: today
+  render_command:
+    output_folder: rendercv_output
