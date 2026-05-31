@@ -19,12 +19,23 @@ from cv_weaver.models.schemas import CVPoint
 
 @dataclass(frozen=True)
 class RuleResult:
-    """Outcome of a single validation rule."""
+    """Outcome of a single validation rule.
+
+    Attributes:
+        name: Machine-readable rule identifier.
+        passed: Whether the rule passed.
+        message: Human-readable explanation.
+        suggestion: Guidance for fixing the violation.
+        is_blocking: If False, the user may decline the suggestion and proceed.
+            Blocking rules (pronouns, length, verb-start) MUST be fixed.
+            Non-blocking rules (metric suggestion) trigger a question but are optional.
+    """
 
     name: str
     passed: bool
     message: str
     suggestion: Optional[str] = None
+    is_blocking: bool = True
 
 
 # ─── Point-Level Rules ─────────────────────────────────────────────────
@@ -73,13 +84,41 @@ def no_pronouns(point: CVPoint) -> RuleResult:
 
 
 def has_metrics_or_flagged(point: CVPoint) -> RuleResult:
-    """ Bullet should ideally contain quantifiable metrics. """
+    """ Bullet should ideally contain quantifiable metrics. Non-blocking. """
     passed = point.has_metrics
     return RuleResult(
         name="has_metrics_or_flagged",
         passed=passed,
         message="Bullet contains metrics." if passed else "Bullet has no quantifiable metrics.",
         suggestion=None if passed else "Add numbers, percentages, or dollar amounts to the result.",
+        is_blocking=False,
+    )
+
+
+WEAK_VERBS = {
+    "helped",
+    "assisted",
+    "participated",
+    "worked",
+    "was",
+    "were",
+    "involved",
+    "contributed",
+    "supported",
+    "handled",
+}
+
+
+def strong_action_verb(point: CVPoint) -> RuleResult:
+    """ action_verb should be high-impact, not weak or passive. Non-blocking. """
+    verb = point.components.action_verb.lower().strip()
+    passed = verb not in WEAK_VERBS
+    return RuleResult(
+        name="strong_action_verb",
+        passed=passed,
+        message=f"Verb '{verb}' is strong." if passed else f"Verb '{verb}' is weak or passive.",
+        suggestion=None if passed else f"Replace '{verb}' with a high-impact past-tense verb (e.g., Led, Architected, Built, Engineered, Optimized).",
+        is_blocking=False,
     )
 
 
@@ -88,6 +127,7 @@ POINT_LEVEL_RULES: List = [
     starts_with_action_verb,
     under_200_chars,
     no_pronouns,
+    strong_action_verb,
     has_metrics_or_flagged,
 ]
 

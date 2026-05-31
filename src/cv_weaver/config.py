@@ -12,7 +12,7 @@ class Settings(BaseModel):
     All fields have sensible defaults for local Ollama development.
     """
 
-    ollama_base_url: HttpUrl = Field(default="http://localhost:11434/v1")
+    ollama_base_url: HttpUrl = Field(default="")
     ollama_api_key: str = Field(default="ollama")
     generation_model: str = Field(default="llama3.2")
     embedding_model: str = Field(default="nomic-embed-text")

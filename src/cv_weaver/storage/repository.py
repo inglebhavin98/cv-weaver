@@ -7,7 +7,7 @@ All methods accept and return typed Pydantic models.
 import sqlite3
 from typing import List, Optional
 
-from cv_weaver.models.enums import Status
+from cv_weaver.models.enums import GenerationLevel, Status
 from cv_weaver.models.schemas import CVPoint
 
 
@@ -84,6 +84,21 @@ class CVPointRepository:
                 "UPDATE cv_points SET status = ? WHERE id = ?",
                 (status.value, point_id),
             )
+
+    def list_by_generation_level(self, level: GenerationLevel) -> List[CVPoint]:
+        """Fetch all CVPoints matching the given generation level.
+
+        Args:
+            level: Either L1 (raw extraction) or L2 (experience-level refined).
+
+        Returns:
+            A list of matching CVPoints.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM cv_points WHERE generation_level = ?",
+            (level.value,),
+        ).fetchall()
+        return [CVPoint.from_sqlite_row(row) for row in rows]
 
     def list_approved_with_embeddings(self) -> List[CVPoint]:
         """Fetch all approved CVPoints that have a pre-computed embedding.

@@ -6,7 +6,7 @@ from typing import List, Optional, Self
 
 from pydantic import BaseModel, Field, computed_field
 
-from .enums import ClassificationType, ExperienceType, Status
+from .enums import ClassificationType, ExperienceType, GenerationLevel, Status
 
 
 class SourceContext(BaseModel):
@@ -58,6 +58,7 @@ class CVPoint(BaseModel):
     metadata: PointMetadata
     classification: Classification
     scores: PointScores
+    generation_level: GenerationLevel = GenerationLevel.L1
 
     @computed_field
     @property
@@ -88,6 +89,7 @@ class CVPoint(BaseModel):
             "impact_score": self.scores.impact_score,
             "ats_score": self.scores.ats_score,
             "completeness_score": self.scores.completeness_score,
+            "generation_level": self.generation_level.value,
         }
 
     @classmethod
@@ -128,4 +130,5 @@ class CVPoint(BaseModel):
                 ats_score=row["ats_score"],
                 completeness_score=row["completeness_score"],
             ),
+            generation_level=GenerationLevel(row["generation_level"]),
         )

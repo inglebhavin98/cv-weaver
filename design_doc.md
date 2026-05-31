@@ -166,13 +166,13 @@ After all stories in one experience file are processed, the system runs refineme
 All CVPointCandidates → Refinement Engine → Refined Experience Points
 ```
 
-| Operation | Description |
-|-----------|-------------|
-| **Merge duplicates** | Two candidates with same verb + similar context → keep the stronger one |
+| Operation             | Description                                                                    |
+| --------------------- | ------------------------------------------------------------------------------ |
+| **Merge duplicates**  | Two candidates with same verb + similar context → keep the stronger one        |
 | **Split rich points** | One candidate with 2+ distinct achievements → ask user: "Split into 2 points?" |
-| **Drop weak points** | No clear contribution, vague scope → flagged for user review |
-| **Re-order** | Sort by estimated impact score |
-| **Coverage check** | Skills from metadata not reflected in any point → flag gap |
+| **Drop weak points**  | No clear contribution, vague scope → flagged for user review                   |
+| **Re-order**          | Sort by estimated impact score                                                 |
+| **Coverage check**    | Skills from metadata not reflected in any point → flag gap                     |
 
 The user reviews the refined set (typically 5–8 points per experience) and approves, edits, or drops each one.
 
