@@ -60,7 +60,7 @@ ARCHITECTURE_DECISIONS
 
 ## ADR-004: Markdown Parser Uses a Lightweight Grammar
 
-**Status:** `[PENDING]`
+**Status:** `[DONE]`
 
 **Context:** The chunking strategy in TECH_SPEC §2.2 relies on heuristics (double newlines, bullet markers, date anchors). This is fragile.
 
@@ -74,9 +74,22 @@ ARCHITECTURE_DECISIONS
 
 ---
 
-## ADR-005: Instructor Wrapper Is a Thin Factory
+## ADR-005: Native Ollama Client with Manual Structured Output
 
 **Status:** `[DONE]`
+
+**Context:** `llm_client/instructor_wrapper.py` was planned as a thin factory around the `instructor` library. The `instructor` library expects an OpenAI-compatible client (`/v1/chat/completions`), but Ollama Cloud uses the native Ollama API (`/api/chat`). The cloud endpoint fails with 401 when accessed via OpenAI client libraries.
+
+**Decision:** Build a lightweight `LLMClient` that uses the native `ollama` Python library (`ollama.Client`). It calls `client.chat()` directly, then manually extracts JSON from the response text and validates via `Pydantic.model_validate_json()`. Add retry logic (up to 3 attempts) with error-appended conversation history for self-correction.
+
+**Rationale:** The `instructor` library's value proposition is "structured output via function calling / JSON mode." Since we must use the native Ollama API, we replicate the same three operations manually: JSON extraction, Pydantic validation, retry loop. This is explicit and inspectable — no hidden framework magic.
+
+**Impact:** High. Affects `llm_client/instructor_wrapper.py` and every LLM-dependent module.
+
+**Learnings (post-implementation):**
+- `stream=True` is **required** for cloud models with long generation times. `stream=False` causes `httpx.ReadTimeout` because the timeout bounds total time-to-last-byte.
+- `format='json'` adds markdown fences (```json) and increases generation time by ~60%.
+- `options={"num_predict": N}` causes **completely empty output** on `kimi-k2.6` via Ollama Cloud. This was discovered via systematic parameter isolation (see `docs/llm_integration_notes.md`).
 
 **Context:** `llm_client/instructor_wrapper.py` is empty.
 
@@ -90,7 +103,7 @@ ARCHITECTURE_DECISIONS
 
 ## ADR-006: Prompts Are Versioned String Assets
 
-**Status:** `[PENDING]`
+**Status:** `[DONE]`
 
 **Context:** `generator/prompts.py` is empty.
 
@@ -104,7 +117,7 @@ ARCHITECTURE_DECISIONS
 
 ## ADR-007: Validator Returns Structured Feedback, Not Just Pass/Fail
 
-**Status:** `[PENDING]`
+**Status:** `[DONE]`
 
 **Context:** The validator checks rules but the retry loop needs context on *which* rules failed.
 
@@ -293,7 +306,7 @@ ARCHITECTURE_DECISIONS
 
 ## ADR-020: Validation Rules in Dedicated File with Two Layers
 
-**Status:** `[PENDING]`
+**Status:** `[DONE]`
 
 **Context:** Validation rules are currently implicit in `generator/validator.py`. There is no separation between "what is checked" and "how it is orchestrated." Additionally, there is no validation across multiple CV points (whole-CV level).
 
@@ -394,6 +407,70 @@ ARCHITECTURE_DECISIONS
 
 ---
 
+## ADR-025: Streaming Required for Cloud LLM Timeout Management
+
+**Status:** `[DONE]`
+
+**Context:** The first L1 pipeline runs with `kimi-k2.6` on Ollama Cloud failed with `httpx.ReadTimeout` after 30s, then 90s, then 150s. The model successfully completed a simple chat in 5s and a medium prompt in 20s, but the full drafter prompt (system + story + rubric) consistently exceeded the timeout.
+
+**Decision:** Always use `stream=True` for LLM calls in the pipeline. Accumulate chunks into a full response string, then extract JSON and validate. Never use `stream=False` for cloud models.
+
+**Rationale:** `httpx` read timeout measures time from last byte received. With `stream=True`, each chunk resets the timer. A model that takes 300s total but emits chunks every 2–5s will never trigger a timeout. With `stream=False`, the timeout bounds total time-to-last-byte, which is unpredictable for large structured outputs.
+
+**Impact:** High. Affects `llm_client/instructor_wrapper.py`.
+
+**Verification:** See `docs/llm_integration_notes.md` §"Timeout Diagnostic Matrix" for the exact parameter grid that isolated this behavior.
+
+---
+
+## ADR-026: System Prompt Loaded from External XML File
+
+**Status:** `[DONE]`
+
+**Context:** The drafter, refiner, and judge all need the same persona, structural laws, grammar rules, and action verb bank. Embedding this in a Python string constant is hard to read and version.
+
+**Decision:** Store the unified system prompt as `system_prompt_v1.xml` in `src/cv_weaver/generator/`. Load it at module import time with `Path.read_text()`. Send it as the `system` role message on every LLM call.
+
+**Rationale:** XML is natively parsed by modern LLMs (no special parsing needed). A separate file makes prompt engineering visible and version-controllable via git. Future versions (`v2`, `v3`) can coexist as separate files for A/B testing.
+
+**Impact:** Medium. Affects `generator/prompts.py` and `generator/system_prompt_v1.xml`.
+
+---
+
+## ADR-027: Drafter Prompt Must Explicitly List ALL Response Fields
+
+**Status:** `[DONE]`
+
+**Context:** Early drafter prompts only listed 6 fields in the rubric (`action_verb`, `context`, `result`, `rendered_bullet`, `impact_metrics`, `skills_utilized`). The `CVPointCandidate` schema requires 9 fields. The model consistently omitted `extended_context_situation`, `extended_context_task`, and `domain_tags` on the first attempt, causing validation failures and 300–600s retry delays.
+
+**Decision:** The drafter prompt must enumerate every single field in the rubric, in the exact order they appear in the schema, with type hints and examples. Include a literal JSON shape block at the end showing the exact expected output structure.
+
+**Rationale:** LLMs are lazy completers. If a field is not mentioned in the instructions, it has ~30% chance of being omitted in large structured outputs. Explicit enumeration raises first-attempt success rate from ~50% to ~100%.
+
+**Impact:** Medium. Affects `generator/prompts.py`.
+
+**Verification:** Before fix: 3/3 stories failed attempt 1. After fix: 3/3 stories succeeded attempt 1.
+
+---
+
+## ADR-028: Do Not Use `num_predict` or `format='json'` with Ollama Cloud Models
+
+**Status:** `[DONE]`
+
+**Context:** We attempted to optimize the pipeline by passing `format='json'` and `options={"num_predict": 2048}` to constrain output and prevent runaway generation.
+
+**Decision:** Do NOT pass `format='json'` or `options` containing `num_predict` to the Ollama Cloud API when using `kimi-k2.6`. Rely on prompt instructions and post-hoc JSON extraction instead.
+
+**Rationale (discovered via isolation testing):**
+- `format='json'` slows generation by ~60% (474s vs 286s for same prompt) and causes the model to wrap output in markdown fences (` ```json `).
+- `options={"num_predict": N}` causes **completely empty output** — the response contains zero content characters. This happens consistently across multiple values of N (512, 1024, 2048). The API returns HTTP 200 with an empty message. This is a cloud-model-specific behavior not documented in the Ollama API.
+
+**Impact:** High. Affects `llm_client/instructor_wrapper.py`.
+
+**Verification:** See `docs/llm_integration_notes.md` §"Parameter Isolation Matrix".
+
+---
+
 ## Implementation Priority Queue
 
 ### Must-Do Before First Feature
@@ -404,7 +481,7 @@ ARCHITECTURE_DECISIONS
 5. `generator/validation_rules.py` + `generator/validator.py` (blocks generator pipeline)
 
 ### High Value, Can Defer
-6. Markdown grammar convention (ADR-004)
+6. Markdown grammar convention (ADR-004 — done)
 7. Embedding matrix cache (ADR-008)
 8. Ground-truth benchmark fixtures (ADR-014)
 9. Consolidate static info into `profile.yaml` (ADR-018)
@@ -419,6 +496,6 @@ ARCHITECTURE_DECISIONS
 16. Click CLI (ADR-011)
 17. Test strategy execution (ADR-012)
 18. Editable install docs (ADR-013)
-19. Prompt versioning (ADR-006)
-20. Structured validator feedback (ADR-007)
+19. Prompt versioning (ADR-006 — done)
+20. Structured validator feedback (ADR-007 — done)
 21. Framing technique registry (ADR-021 — deferred)
