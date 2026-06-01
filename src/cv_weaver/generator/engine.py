@@ -19,6 +19,7 @@ from typing import List, Optional
 from cv_weaver.config import Settings
 from cv_weaver.generator.prompts import (
     CVPointCandidate,
+    JUDGE_SYSTEM_PROMPT,
     PointEvaluation,
     PROBER_SYSTEM_PROMPT,
     SemanticProberResult,
@@ -168,6 +169,7 @@ class GeneratorEngine:
         current = candidate
         qna_rounds = 0
         converged = False
+        clarifications: List[str] = []
 
         # Two-phase QnA refinement loop
         for round_num in range(self._max_qna_rounds):
@@ -203,6 +205,7 @@ class GeneratorEngine:
                     flaw_description=f"{target.name}: {target.message}",
                     user_answer=user_answer,
                     context_paragraph=experience.context_paragraph,
+                    prior_clarifications=clarifications,
                 )
                 from cv_weaver.generator.prompts import RefinedPoint
                 refined: RefinedPoint = self._client.chat_completion(
@@ -211,6 +214,7 @@ class GeneratorEngine:
                 )
                 print(f"    [CAND {candidate_index}] Refiner done in {time.perf_counter() - ref_t0:.2f}s")
                 current = refined.refined
+                clarifications.append(f"Structural fix ({target.name}): {user_answer}")
                 continue  # loop back to re-validate structurally
 
             # ── Phase 2: Semantic Prober ──
@@ -245,6 +249,7 @@ class GeneratorEngine:
                 flaw_description=f"Semantic gap ({', '.join(prober_result.gap_categories)}): {prober_result.what_is_missing}",
                 user_answer=user_answer,
                 context_paragraph=experience.context_paragraph,
+                prior_clarifications=clarifications,
             )
             from cv_weaver.generator.prompts import RefinedPoint
             refined: RefinedPoint = self._client.chat_completion(
@@ -253,6 +258,7 @@ class GeneratorEngine:
             )
             print(f"    [CAND {candidate_index}] Refiner done in {time.perf_counter() - ref_t0:.2f}s")
             current = refined.refined
+            clarifications.append(f"Semantic fix ({', '.join(prober_result.gap_categories)}): {user_answer}")
             # loop back to re-validate structurally + probe semantically
 
         # Judge scoring (after QnA convergence, regardless of whether it was skipped)
@@ -264,6 +270,8 @@ class GeneratorEngine:
         evaluation: PointEvaluation = self._client.chat_completion(
             prompt=judge_prompt_text,
             response_model=PointEvaluation,
+            system_prompt=JUDGE_SYSTEM_PROMPT,
+            model=self._settings.judge_model,
         )
         judge_elapsed = time.perf_counter() - judge_t0
         print(f"    [CAND {candidate_index}] Judge done in {judge_elapsed:.2f}s (impact={evaluation.impact_score} ats={evaluation.ats_score} complete={evaluation.completeness_score})")

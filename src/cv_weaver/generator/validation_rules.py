@@ -84,14 +84,14 @@ def no_pronouns(point: CVPoint) -> RuleResult:
 
 
 def has_metrics_or_flagged(point: CVPoint) -> RuleResult:
-    """ Bullet should ideally contain quantifiable metrics. Non-blocking. """
+    """Bullet must contain quantifiable metrics. Blocking — saves an LLM prober call."""
     passed = point.has_metrics
     return RuleResult(
         name="has_metrics_or_flagged",
         passed=passed,
         message="Bullet contains metrics." if passed else "Bullet has no quantifiable metrics.",
-        suggestion=None if passed else "Add numbers, percentages, or dollar amounts to the result.",
-        is_blocking=False,
+        suggestion=None if passed else "Can you quantify the result? (e.g., saved 10 hours/week, increased efficiency by 15%, reduced latency by 60%)",
+        is_blocking=True,
     )
 
 
@@ -106,30 +106,33 @@ WEAK_VERBS = {
     "contributed",
     "supported",
     "handled",
+    "did",
+    "responsible",
 }
 
 
 def strong_action_verb(point: CVPoint) -> RuleResult:
-    """ action_verb should be high-impact, not weak or passive. Non-blocking. """
+    """action_verb must be high-impact, not weak or passive. Blocking."""
     verb = point.components.action_verb.lower().strip()
     passed = verb not in WEAK_VERBS
     return RuleResult(
         name="strong_action_verb",
         passed=passed,
         message=f"Verb '{verb}' is strong." if passed else f"Verb '{verb}' is weak or passive.",
-        suggestion=None if passed else f"Replace '{verb}' with a high-impact past-tense verb (e.g., Led, Architected, Built, Engineered, Optimized).",
-        is_blocking=False,
+        suggestion=None if passed else f"The verb '{verb}' is passive. Did you 'Architect', 'Manage', 'Develop', or 'Lead' this instead?",
+        is_blocking=True,
     )
 
 
 # Ordered list of point-level BLOCKING rules.
-# Structural validator enforces hard constraints (format, grammar).
-# Semantic quality concerns (weak verbs, missing metrics) are handled
-# by the Semantic Prober LLM, not by deterministic Python rules.
+# Structural validator enforces hard constraints (format, grammar, metrics, verb strength).
+# The Semantic Prober LLM handles deeper semantic gaps (scope, business linkage, etc.).
 POINT_LEVEL_RULES: List = [
     starts_with_action_verb,
     under_200_chars,
     no_pronouns,
+    has_metrics_or_flagged,
+    strong_action_verb,
 ]
 
 

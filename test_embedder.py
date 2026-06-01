@@ -11,7 +11,7 @@ print(f"Embedding model: {settings.embedding_model}")
 print(f"Ollama URL:      {settings.ollama_base_url}")
 print()
 
-client = create_embedder_client(settings)
+client = create_embedder_client()
 
 # ─── Single embedding ──────────────────────────────────────────────────
 text = "Led a team of 5 engineers to redesign the payments API, reducing P95 latency from 800ms to 120ms."

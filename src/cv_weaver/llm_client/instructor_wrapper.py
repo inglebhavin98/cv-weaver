@@ -61,13 +61,14 @@ class LLMClient:
         if host.endswith("/v1"):
             host = host[:-3]
 
-        self._client = ollama.Client(host=host, headers=headers, timeout=150.0)
+        self._client = ollama.Client(host=host, headers=headers, timeout=300.0)
 
     def chat_completion(
         self,
         prompt: str,
         response_model: Type[T],
         system_prompt: str | None = None,
+        model: str | None = None,
     ) -> T:
         """Send a prompt to the LLM and enforce structured output via Pydantic.
 
@@ -97,10 +98,11 @@ class LLMClient:
         from cv_weaver.generator.prompts import SYSTEM_PROMPT
 
         sys_msg = system_prompt if system_prompt is not None else SYSTEM_PROMPT
+        model_name = model or self._model
         t0 = time.perf_counter()
         print(
             f"    [LLM] START {response_model.__name__:25s} "
-            f"model={self._model} sys={len(sys_msg)} chars prompt={len(prompt)} chars"
+            f"model={model_name} sys={len(sys_msg)} chars prompt={len(prompt)} chars"
         )
 
         messages = [
@@ -113,7 +115,7 @@ class LLMClient:
             try:
                 # Stream so timeout resets per chunk instead of bounding total generation time.
                 stream = self._client.chat(
-                    model=self._model,
+                    model=model_name,
                     messages=messages,
                     stream=True,
                 )
@@ -141,7 +143,7 @@ class LLMClient:
         elapsed = time.perf_counter() - t0
         print(f"    [LLM] FAIL  {response_model.__name__:25s} after {elapsed:.2f}s (exhausted retries)")
         raise LLMRetryError(
-            model_name=self._model,
+            model_name=model_name,
             response_model=response_model.__name__,
             attempts=self._MAX_RETRIES,
             last_error=last_error,

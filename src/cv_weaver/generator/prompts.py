@@ -25,6 +25,9 @@ SYSTEM_PROMPT: str = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
 _PROBER_SYSTEM_PROMPT_PATH = Path(__file__).with_name("system_prompt_prober.xml")
 PROBER_SYSTEM_PROMPT: str = _PROBER_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
+_JUDGE_SYSTEM_PROMPT_PATH = Path(__file__).with_name("system_prompt_judge.xml")
+JUDGE_SYSTEM_PROMPT: str = _JUDGE_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+
 
 # ─── Response Models for LLM Output ────────────────────────────────────
 
@@ -126,7 +129,7 @@ class SemanticProberResult(BaseModel):
     )
     gap_categories: List[str] = Field(
         default_factory=list,
-        description="Categories of gaps found: metrics, tech_stack, scope, business, org_scale, leadership_scope, cross_functional"
+        description="Categories of gaps found: metrics, tech_stack, scope, business, org_scale, leadership_scope, cross_functional, logic_check"
     )
     target_question: str = Field(
         description="A single, hyper-targeted CLI question to ask the user. Must be answerable in one sentence. Empty string if no gap."
@@ -254,17 +257,27 @@ def refiner_prompt(
     flaw_description: str,
     user_answer: str,
     context_paragraph: str | None = None,
+    prior_clarifications: List[str] | None = None,
 ) -> str:
     """Build the L1 Refiner prompt.
 
     The LLM receives the previous draft, the validation flaw that was found,
-    and the user's answer. It regenerates an improved CVPointCandidate.
+    the user's answer, and any prior clarifications from earlier rounds.
+    It regenerates an improved CVPointCandidate.
     """
     context_block = (
         f"\n## Overall Role Context\n{context_paragraph}\n"
         if context_paragraph
         else ""
     )
+
+    history_block = ""
+    if prior_clarifications:
+        history_block = (
+            "## Previous Clarifications\n"
+            + "\n".join(f"- {c}" for c in prior_clarifications)
+            + "\n"
+        )
 
     return f"""You are a senior technical resume writer refining a CV bullet point.
 
@@ -285,9 +298,10 @@ def refiner_prompt(
 ## User's Input
 "{user_answer}"
 
-## Task
+{history_block}## Task
 Regenerate the CV point incorporating the user's input.
 You may modify any field. Preserve what was already strong. Fix only the issue.
+Do NOT drop data from previous clarifications — retain every improvement made so far.
 
 Return a JSON object matching the RefinedPoint schema with:
 - refined: the updated CVPointCandidate
@@ -343,12 +357,19 @@ Be critical. A 10/10 is rare.
 - 1 = Technical outcome stated but business link missing
 - 0 = No outcome stated (only describes what was done)
 
+### Dimension 5: ATS & Keyword Formatting (0–2)
+- 2 = Flawless: skills embedded naturally in prose, acronyms expanded on first use, no pronouns, no keyword stuffing
+- 1 = Standard formatting: readable and professional, but acronyms unexpanded or minor keyword density issues
+- 0 = Poor: pronouns used (I, me, my, we, our), blatant keyword stuffing, or broken grammar that would trigger ATS rejection
+
 ## Scoring Formula
-- impact_score = Dimension 1 + Dimension 2 + Dimension 3 + Dimension 4 (0–10)
-- ats_score = round((Dimension 2 + Dimension 3 + (1 if Dimension 1 ≥ 2 else 0)) × 10 / 6)
-  * This weights Action Clarity (Dim 2) and Scope Signal (Dim 3) highest,
-    with a bonus for strong quantification (Dim 1 ≥ 2). Scaled 0–10.
-- completeness_score = sum of all dimensions (0–10)
+- impact_score = Dimension 1 + Dimension 2 + Dimension 3 + Dimension 4 + Dimension 5 (0–12, then clamped 0–10)
+  * Because the raw sum can exceed 10, the impact_score is the raw sum clamped to a maximum of 10.
+- ats_score = round((Dimension 2 + Dimension 3 + Dimension 5 + (1 if Dimension 1 ≥ 2 else 0)) × 10 / 8)
+  * This weights Action Clarity (Dim 2), Scope Signal (Dim 3), and ATS Formatting (Dim 5) highest,
+    with a bonus for strong quantification (Dim 1 ≥ 2). Max numerator = 8. Scaled 0–10.
+- completeness_score = sum of all dimensions (0–12, then clamped 0–10)
+  * Raw sum of D1–D5, clamped to a maximum of 10.
 
 ## Output
 Return a JSON object matching the PointEvaluation schema with:
