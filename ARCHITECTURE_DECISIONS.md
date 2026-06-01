@@ -499,3 +499,33 @@ ARCHITECTURE_DECISIONS
 19. Prompt versioning (ADR-006 — done)
 20. Structured validator feedback (ADR-007 — done)
 21. Framing technique registry (ADR-021 — deferred)
+
+---
+
+## ADR-029: Semantic Prober for Proactive QnA
+
+**Status:** `[DONE]`
+
+**Context:** The baseline QnA loop was purely reactive: it only triggered when hardcoded Python validation rules failed (length, pronouns, verb strength). If structural checks passed, the candidate immediately converged — even if the draft omitted rich technical detail, metrics, or scale signals from the raw story.
+
+**Decision:** Add a **Semantic Prober** LLM call after structural validation passes. The prober compares the draft candidate against the full raw narrative and identifies semantic gaps: metrics, tech stack specificity, scope, business impact, org scale, leadership scope, and cross-functional alignment. If gaps exist, the prober generates a single hyper-targeted CLI question, the user answers, and the Refiner rebuilds the point.
+
+**Two-Phase Gate Architecture:**
+1. **Phase 1 — Structural Validation:** Deterministic Python rules (blocking-only: length, pronouns, verb-start). Fast, cheap, catches formatting errors.
+2. **Phase 2 — Semantic Probing:** LLM-driven comparison of draft vs raw story. Expensive but catches quality issues no regex can find.
+3. **Phase 3 — Semantic QnA:** User answers the prober's question → Refiner LLM rebuilds.
+
+**Prober Prompt Design:**
+- Dedicated XML system prompt (`system_prompt_prober.xml`) with `<role>` (ruthless senior editor), `<mission>` (compare draft vs raw story), `<audit_checklist>` (7 categories), and `<execution_directives>` (no hallucination, strict JSON).
+- **Job A (Explicit Omissions):** Raw story stated data the draft missed.
+- **Job B (Implied but Unstated):** Raw story hinted at metric/tech/scale but didn't provide exact value — prober explicitly asks.
+
+**Schema:** `SemanticProberResult` with `has_semantic_gap`, `gap_categories`, `target_question`, `what_is_missing`, `confidence`.
+
+**Validation Rules Trimmed:** Removed non-blocking rules (`strong_action_verb`, `has_metrics_or_flagged`) from `POINT_LEVEL_RULES`. These concerns now live in the Semantic Prober, which can ask nuanced questions like "Was this 5-day endpoint measured to first PR opened or merged?" instead of a blunt "Add metrics."
+
+**Impact:** High. Affects `generator/engine.py`, `generator/prompts.py`, `generator/validation_rules.py`, `generator/system_prompt_prober.xml`.
+
+**Verification:** All 5 candidates in test run triggered semantic QnA. Prober confidence consistently 9/10. Questions were hyper-specific and actionable.
+
+**Tradeoff:** Pipeline time increased from ~15 min to ~29 min per file (3 stories). The prober adds one LLM call per candidate (~75–180s). This is acceptable for quality in a personal tool.
