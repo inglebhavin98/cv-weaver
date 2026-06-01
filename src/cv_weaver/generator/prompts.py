@@ -22,6 +22,9 @@ from pydantic import BaseModel, Field
 _SYSTEM_PROMPT_PATH = Path(__file__).with_name("system_prompt_v1.xml")
 SYSTEM_PROMPT: str = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
+_PROBER_SYSTEM_PROMPT_PATH = Path(__file__).with_name("system_prompt_prober.xml")
+PROBER_SYSTEM_PROMPT: str = _PROBER_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+
 
 # ─── Response Models for LLM Output ────────────────────────────────────
 
@@ -107,6 +110,32 @@ class PointEvaluation(BaseModel):
     specific_suggestions: List[str] = Field(
         default_factory=list,
         description="Concrete improvements the user could make",
+    )
+
+
+class SemanticProberResult(BaseModel):
+    """Response model for the L1 Semantic Prober.
+
+    The prober compares a draft CVPoint against the raw narrative story
+    to identify semantic gaps: metrics, tech stack, scope, or business
+    impact that the draft omitted or diluted.
+    """
+
+    has_semantic_gap: bool = Field(
+        description="True if the draft omits or dilutes meaningful data present in or strongly implied by the raw story"
+    )
+    gap_categories: List[str] = Field(
+        default_factory=list,
+        description="Categories of gaps found: metrics, tech_stack, scope, business, org_scale, leadership_scope, cross_functional"
+    )
+    target_question: str = Field(
+        description="A single, hyper-targeted CLI question to ask the user. Must be answerable in one sentence. Empty string if no gap."
+    )
+    what_is_missing: str = Field(
+        description="Detailed description of the gap for the Refiner. Empty string if no gap."
+    )
+    confidence: int = Field(
+        ge=0, le=10, description="How certain the prober is that this gap is real (0=guessing, 10=certain)"
     )
 
 
@@ -327,4 +356,42 @@ Return a JSON object matching the PointEvaluation schema with:
 - impact_score, ats_score, completeness_score
 - overall_reasoning: summary of strengths and weaknesses
 - specific_suggestions: concrete improvements (empty if none)
+"""
+
+
+def prober_prompt(
+    story_title: str,
+    story_body: str,
+    candidate: CVPointCandidate,
+) -> str:
+    """Build the L1 Semantic Prober prompt.
+
+    The LLM receives the full raw story + the current draft candidate,
+    then identifies semantic gaps where the draft left technical depth,
+    metrics, or scale on the table.
+    """
+    return f"""## Raw Story (Narrative)
+
+### {story_title}
+{story_body}
+
+## Draft CV Point
+
+- **rendered_bullet**: {candidate.rendered_bullet}
+- **action_verb**: {candidate.action_verb}
+- **context**: {candidate.context}
+- **result**: {candidate.result}
+- **skills**: {', '.join(candidate.skills_utilized) or 'none'}
+- **metrics**: {', '.join(candidate.impact_metrics) or 'none'}
+- **domain_tags**: {', '.join(candidate.domain_tags) or 'none'}
+
+## Task
+Compare the DRAFT against the RAW STORY. Identify every piece of technical depth, quantified impact, scale signal, or business linkage that appears in or is strongly implied by the raw story but is MISSING, DILUTED, or VAGUE in the draft.
+
+Return a JSON object matching the SemanticProberResult schema with:
+- has_semantic_gap: true if any gap exists
+- gap_categories: list of categories where gaps were found
+- target_question: a single hyper-specific CLI question to ask the user (empty if no gap)
+- what_is_missing: detailed gap description for the Refiner (empty if no gap)
+- confidence: 0–10 certainty score
 """

@@ -122,13 +122,14 @@ def strong_action_verb(point: CVPoint) -> RuleResult:
     )
 
 
-# Ordered list of all point-level rules. The validator runs these in order.
+# Ordered list of point-level BLOCKING rules.
+# Structural validator enforces hard constraints (format, grammar).
+# Semantic quality concerns (weak verbs, missing metrics) are handled
+# by the Semantic Prober LLM, not by deterministic Python rules.
 POINT_LEVEL_RULES: List = [
     starts_with_action_verb,
     under_200_chars,
     no_pronouns,
-    strong_action_verb,
-    has_metrics_or_flagged,
 ]
 
 

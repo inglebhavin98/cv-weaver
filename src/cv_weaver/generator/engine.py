@@ -20,9 +20,12 @@ from cv_weaver.config import Settings
 from cv_weaver.generator.prompts import (
     CVPointCandidate,
     PointEvaluation,
+    PROBER_SYSTEM_PROMPT,
+    SemanticProberResult,
     StoryExtraction,
     drafter_prompt,
     judge_prompt,
+    prober_prompt,
     refiner_prompt,
 )
 from cv_weaver.generator.validation_rules import RuleResult, POINT_LEVEL_RULES
@@ -166,51 +169,80 @@ class GeneratorEngine:
         qna_rounds = 0
         converged = False
 
-        # QnA refinement loop
+        # Two-phase QnA refinement loop
         for round_num in range(self._max_qna_rounds):
+            # ── Phase 1: Structural Validation ──
             val_t0 = time.perf_counter()
-            # Build a temporary CVPoint for validation
             temp_point = self._build_cvpoint(
                 candidate=current,
                 story=story,
                 experience=experience,
                 status=Status.DRAFT,
             )
-
-            # Run deterministic validation
             violations = self._run_validation(temp_point)
             blocking = [v for v in violations if v.is_blocking]
-            non_blocking = [v for v in violations if not v.is_blocking]
             val_elapsed = time.perf_counter() - val_t0
-            print(f"    [CAND {candidate_index}] Validation: {len(blocking)} blocking, {len(non_blocking)} non-blocking in {val_elapsed:.3f}s")
+            print(f"    [CAND {candidate_index}] Structural: {len(blocking)} blocking in {val_elapsed:.3f}s")
 
-            # If no blocking violations, we converge
-            if not blocking:
+            if blocking:
+                target = blocking[0]
+                qna_rounds += 1
+                print(f"\n    [Structural QnA Round {qna_rounds}] {target.message}")
+                if target.suggestion:
+                    print(f"    Suggestion: {target.suggestion}")
+                user_answer = input("    Your response (or 'skip' to accept as-is): ").strip()
+
+                if user_answer.lower() == "skip":
+                    converged = True
+                    print(f"    [CAND {candidate_index}] User skipped structural QnA")
+                    break
+
+                ref_t0 = time.perf_counter()
+                refiner_prompt_text = refiner_prompt(
+                    previous_candidate=current,
+                    flaw_description=f"{target.name}: {target.message}",
+                    user_answer=user_answer,
+                    context_paragraph=experience.context_paragraph,
+                )
+                from cv_weaver.generator.prompts import RefinedPoint
+                refined: RefinedPoint = self._client.chat_completion(
+                    prompt=refiner_prompt_text,
+                    response_model=RefinedPoint,
+                )
+                print(f"    [CAND {candidate_index}] Refiner done in {time.perf_counter() - ref_t0:.2f}s")
+                current = refined.refined
+                continue  # loop back to re-validate structurally
+
+            # ── Phase 2: Semantic Prober ──
+            probe_t0 = time.perf_counter()
+            prober_result = self._run_semantic_probe(current, story)
+            probe_elapsed = time.perf_counter() - probe_t0
+            print(
+                f"    [CAND {candidate_index}] Prober: gap={prober_result.has_semantic_gap} "
+                f"confidence={prober_result.confidence} cats={prober_result.gap_categories} "
+                f"in {probe_elapsed:.2f}s"
+            )
+
+            if not prober_result.has_semantic_gap:
                 converged = True
-                print(f"    [CAND {candidate_index}] Converged after {round_num} round(s)")
+                print(f"    [CAND {candidate_index}] Converged after {round_num} round(s) — no semantic gaps")
                 break
 
-            # Pick the first blocking violation as the focus of this round
-            target = blocking[0]
+            # ── Phase 3: Semantic QnA ──
             qna_rounds += 1
-
-            # CLI interaction: present flaw + ask user
-            print(f"\n    [QnA Round {qna_rounds}] {target.message}")
-            if target.suggestion:
-                print(f"    Suggestion: {target.suggestion}")
+            print(f"\n    [Semantic QnA Round {qna_rounds}] {prober_result.target_question}")
+            print(f"    [Missing: {prober_result.what_is_missing}]")
             user_answer = input("    Your response (or 'skip' to accept as-is): ").strip()
 
             if user_answer.lower() == "skip":
-                # User declines to fix this blocking rule — mark as converged anyway
                 converged = True
-                print(f"    [CAND {candidate_index}] User skipped QnA")
+                print(f"    [CAND {candidate_index}] User skipped semantic QnA")
                 break
 
-            # Refiner LLM call
             ref_t0 = time.perf_counter()
             refiner_prompt_text = refiner_prompt(
                 previous_candidate=current,
-                flaw_description=f"{target.name}: {target.message}",
+                flaw_description=f"Semantic gap ({', '.join(prober_result.gap_categories)}): {prober_result.what_is_missing}",
                 user_answer=user_answer,
                 context_paragraph=experience.context_paragraph,
             )
@@ -219,9 +251,9 @@ class GeneratorEngine:
                 prompt=refiner_prompt_text,
                 response_model=RefinedPoint,
             )
-            ref_elapsed = time.perf_counter() - ref_t0
-            print(f"    [CAND {candidate_index}] Refiner done in {ref_elapsed:.2f}s")
+            print(f"    [CAND {candidate_index}] Refiner done in {time.perf_counter() - ref_t0:.2f}s")
             current = refined.refined
+            # loop back to re-validate structurally + probe semantically
 
         # Judge scoring (after QnA convergence, regardless of whether it was skipped)
         judge_t0 = time.perf_counter()
@@ -276,6 +308,28 @@ class GeneratorEngine:
             if not result.passed:
                 failures.append(result)
         return failures
+
+    def _run_semantic_probe(
+        self,
+        candidate: CVPointCandidate,
+        story: Story,
+    ) -> SemanticProberResult:
+        """Call the Semantic Prober LLM to compare draft against raw story.
+
+        Uses the dedicated prober system prompt (PROBER_SYSTEM_PROMPT) to ensure
+        the LLM stays strictly bounded to the audit checklist and does not
+        hallucinate metrics or output conversational filler.
+        """
+        prompt = prober_prompt(
+            story_title=story.title,
+            story_body=story.body,
+            candidate=candidate,
+        )
+        return self._client.chat_completion(
+            prompt=prompt,
+            response_model=SemanticProberResult,
+            system_prompt=PROBER_SYSTEM_PROMPT,
+        )
 
     @staticmethod
     def _build_cvpoint(
