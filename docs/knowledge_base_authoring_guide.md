@@ -13,7 +13,9 @@ Format: `01_<descriptive-name>.md`
 experience/
   01_tata-neu.md
   02_nvidia-research.md
-  03_nexus-ai.md
+projects/
+  01_side-project.md
+  02_open-source-lib.md
 ```
 
 **Rules:**
@@ -21,6 +23,7 @@ experience/
 - The number is for **chronological ordering** only. `01` = oldest, `99` = most recent.
 - The rest of the filename is a short, human-readable slug.
 - Gaps are fine (`01_`, `03_`).
+- Projects use the same naming convention and file format as experience files.
 
 **Why:** The parser scans files in order. Chronological order means the generator sees your career progression the way a recruiter would.
 
@@ -84,23 +87,24 @@ _Metrics_: 3 hires, 2-week ramp-up
 
 The header lives between `---` fences. It is parsed as YAML.
 
-| Field | Required? | Example |
-|-------|-----------|---------|
-| `file_id` | Yes | `01_tata-neu` (typically the filename stem) |
-| `company` | Yes | `Tata Neu` |
-| `position` | Yes | `Senior Software Engineer` |
-| `date` | No | `Jan 2022 – Present` — free-form, shown in the final CV |
-| `start_date` | No | `2022-01` — machine-readable, fallback if `date` omitted |
-| `end_date` | No | `2024-06` or `present` |
-| `location` | No | `Mumbai, India` |
-| `employment_type` | No | `Full-time`, `Contract`, `Freelance` |
-| `domain_tags` | No | `[fintech, platform]` |
-| `roles` | No | See §11 Promotions |
+| Field | Required? | Used by Pipeline? | Example |
+|-------|-----------|-------------------|---------|
+| `file_id` | Yes | Yes — DB primary key | `01_tata-neu` (must match filename stem) |
+| `company` | Yes | No — reference only | `Tata Neu` |
+| `position` | Yes | No — reference only | `Senior Software Engineer` |
+| `date` | No | No — reference only | `Jan 2022 – Present` — free-form, shown in the final CV |
+| `start_date` | No | No — reference only | `2022-01` — machine-readable, fallback if `date` omitted |
+| `end_date` | No | No — reference only | `2024-06` or `present` |
+| `location` | No | No — reference only | `Mumbai, India` |
+| `employment_type` | No | No — reference only | `Full-time`, `Contract`, `Freelance` |
+| `domain_tags` | No | No — future use (Component 4) | `[fintech, platform]` |
+| `roles` | No | No — not yet implemented | See §8 Promotions (future feature) |
 
 **Tips:**
-- `domain_tags` help the customizer engine match points to job descriptions. Keep them broad.
+- `domain_tags` are stored per-point by the LLM drafter. Frontmatter `domain_tags` is reserved for future use.
+- `company` and `position` are human-readable labels for your own reference. They do not flow into generated CV points today.
 - All metadata fields are optional with sensible defaults. You will never be blocked from generating a point.
-- Use the `roles` array instead of `position` when you held multiple titles at the same company. See Section 11.
+- Use the `roles` array instead of `position` when you held multiple titles at the same company. See Section 8 (not yet implemented).
 
 ---
 
@@ -173,7 +177,7 @@ Metadata lines start with an underscore and end with a colon. They are **hints**
 _Skills_: Python, Redis, Kubernetes
 _Metrics_: P95 latency 800ms → 120ms
 _Team_: 3 engineers, 6 weeks
-_Timeline_: Q2 2024
+_Role_: Senior Software Engineer
 ```
 
 | Hint | Purpose | If omitted |
@@ -181,14 +185,34 @@ _Timeline_: Q2 2024
 | `_Skills_` | Technologies you used | LLM infers from narrative or asks in QnA |
 | `_Metrics_` | Quantifiable outcomes | LLM asks "Can you quantify this?" in QnA. Point is still generated. |
 | `_Team_` | Team size, reporting structure | LLM infers or asks |
-| `_Timeline_` | When this happened | Optional context |
-| `_Role_` | Which role this story belongs to | Optional; used for promotions (see §11) |
+| `_Role_` | Which role this story belongs to | Optional; used for promotions (see §8) |
 
 **You will never be blocked** from generating a point because you forgot a metadata line.
 
 ---
 
-## 6. Handling Different Story Types
+## 6. Projects vs. Experience
+
+Projects follow the **exact same format** as experience files. Put them in `projects/` instead of `experience/`.
+
+```markdown
+---
+file_id: 01_resume-builder-ai
+company: Personal Project
+position: Author
+date: Jan 2024 – Present
+---
+
+## AI-Powered Resume Builder
+
+I built a CLI tool that generates structured CV points from raw work-history markdown using local LLMs...
+```
+
+The pipeline treats projects identically — they generate `CVPoint` objects with `experience_type="project"`. The only difference is semantic: project stories often emphasize technical depth and independent execution over team scale.
+
+---
+
+## 7. Handling Different Story Types
 
 Not every story is a standalone achievement. That's fine — the LLM adapts.
 
@@ -246,7 +270,11 @@ Generates: *"Migrated staging environment to Kubernetes and Helm, reducing deplo
 
 ---
 
-## 7. Promotions and Role Changes (Same Company)
+## 8. Promotions and Role Changes (Same Company) — *Future Feature*
+
+> **Status:** Not yet implemented. The parser accepts the `roles` array and `_Role_` hints, but the generator and assembler do not use them today.
+> 
+> This section documents the intended design for when Component 5 (YAML Assembler) is built.
 
 If you were promoted or changed titles while staying at the same company, **keep one file**.
 
@@ -285,7 +313,7 @@ _Metrics_: Team grew from 3 to 8
 _Role_: Staff Engineer
 ```
 
-**Rules:**
+**Rules (when implemented):**
 - Stories **without** a `_Role_` tag are attributed to the most recent role.
 - The assembler groups points by role and emits stacked entries in the final CV.
 - Do **not** split into multiple files for the same company — the shared context and narrative continuity are valuable.
@@ -294,7 +322,7 @@ _Role_: Staff Engineer
 
 ---
 
-## 8. What If You Don't Have Metrics?
+## 9. What If You Don't Have Metrics?
 
 Write the story anyway. The QnA loop will ask, but won't block.
 
@@ -315,7 +343,7 @@ Both paths are valid. The point exists in the pool. You decide later whether to 
 
 ---
 
-## 9. Common Mistakes
+## 10. Common Mistakes
 
 | Mistake | Why It Hurts | Fix |
 |---------|-------------|-----|
@@ -327,7 +355,7 @@ Both paths are valid. The point exists in the pool. You decide later whether to 
 
 ---
 
-## 10. Complete Example
+## 11. Complete Example
 
 ```markdown
 ---
@@ -367,13 +395,15 @@ _Metrics_: 2.3x speedup, 0.4% accuracy drop
 
 ---
 
-## 11. Quick Reference
+## 12. Quick Reference
 
 ```
-01_
-  file_name.md
+experience/          or          projects/
+  01_file_name.md                 01_file_name.md
     ├── YAML Frontmatter
-    │     file_id, company, position, date, ...
+    │     file_id (required)
+    │     company, position (reference only)
+    │     date, location, employment_type (optional)
     │
     ├── Context Paragraph (optional)
     │     High-level role summary
@@ -397,4 +427,7 @@ _Metrics_: 2.3x speedup, 0.4% accuracy drop
 
 ---
 
-> **Bottom line:** One file = one experience. Write stories, not bullets. Include numbers where you have them. The system asks for what's missing. Every story is a candidate for a CV point — the QnA loop decides how many and how good.
+> **Bottom line:** One file = one experience or project. Write stories, not bullets. Include numbers where you have them. The system asks for what's missing. Every story is a candidate for a CV point — the QnA loop decides how many and how good.
+> 
+> **Currently supported:** `file_id` (required), `_Skills_`, `_Metrics_`, `_Team_`, `_Role_` hints, `##` story headings.
+> **Not yet supported:** `roles` array (promotions), frontmatter `domain_tags` (reserved for Component 4).

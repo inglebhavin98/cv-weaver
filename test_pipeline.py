@@ -7,15 +7,19 @@ Orchestrates the full in-scope pipeline with per-stage timing:
 4. Verify       — count points by level/status, assert correctness
 
 Run with:
-    python test_pipeline.py
+    python test_pipeline.py                    # process all knowledge base files
+    python test_pipeline.py --fresh            # wipe DB and reprocess everything
+    python test_pipeline.py --file 01_tata-neu # process one file only
 
 Output: per-stage wall time + aggregate summary. Use this data to optimize.
 """
 
+import argparse
+import builtins
 import sys
 import time
-import builtins
 from pathlib import Path
+from typing import List, Tuple
 
 sys.path.insert(0, "src")
 
@@ -25,6 +29,7 @@ sys.path.insert(0, "src")
 
 _original_input = builtins.input
 
+
 def _smart_input(prompt: str) -> str:
     p = prompt.strip().lower()
     if "approve and commit" in p:
@@ -32,6 +37,7 @@ def _smart_input(prompt: str) -> str:
         return "y"
     print(f"[AUTO-SKIP] {prompt.strip()}")
     return "skip"
+
 
 builtins.input = _smart_input
 
@@ -46,15 +52,49 @@ from cv_weaver.models.enums import GenerationLevel, Status
 from cv_weaver.storage.db import get_connection, init_db
 from cv_weaver.storage.repository import CVPointRepository
 
+# ─── File Discovery ─────────────────────────────────────────────────────
+
+
+def discover_files(kb_path: Path) -> List[Tuple[Path, str]]:
+    """Find all knowledge base markdown files.
+
+    Returns list of (file_path, source_type) where source_type is
+    'experience' or 'project'.
+    """
+    files: List[Tuple[Path, str]] = []
+    for p in sorted((kb_path / "experience").glob("*.md")):
+        files.append((p, "experience"))
+    for p in sorted((kb_path / "projects").glob("*.md")):
+        files.append((p, "project"))
+    return files
+
+
+def resolve_file(kb_path: Path, file_id: str) -> Tuple[Path, str]:
+    """Resolve a specific file_id to (path, source_type)."""
+    candidates = list((kb_path / "experience").glob(f"{file_id}.md"))
+    source_type = "experience"
+    if not candidates:
+        candidates = list((kb_path / "projects").glob(f"{file_id}.md"))
+        source_type = "project"
+    if not candidates:
+        raise FileNotFoundError(f"No knowledge base file for '{file_id}'")
+    return candidates[0], source_type
+
+
 # ─── Stage Functions ────────────────────────────────────────────────────
 
 
-def stage_setup() -> dict:
+def stage_setup(fresh: bool = False) -> dict:
     """Initialize database and settings."""
     t0 = time.perf_counter()
     settings = load_settings()
     db_path = Path(settings.database_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if fresh and db_path.exists():
+        db_path.unlink()
+        print(f"  [SETUP] Wiped existing DB at {db_path}")
+
     init_db(db_path)
     conn = get_connection(db_path)
     repo = CVPointRepository(conn)
@@ -63,7 +103,12 @@ def stage_setup() -> dict:
     return {"settings": settings, "conn": conn, "repo": repo}
 
 
-def stage_l1_generate(ctx: dict, file_id: str, force: bool = False) -> dict:
+def stage_l1_generate(
+    ctx: dict,
+    file_path: Path,
+    source_type: str,
+    force: bool = False,
+) -> dict:
     """Run L1 generation on one knowledge base file.
 
     If force=False and valid L1 drafts already exist, skip re-generation
@@ -71,16 +116,7 @@ def stage_l1_generate(ctx: dict, file_id: str, force: bool = False) -> dict:
     """
     settings = ctx["settings"]
     repo = ctx["repo"]
-
-    # Resolve file
-    kb = Path(settings.knowledge_base_path)
-    candidates = list((kb / "experience").glob(f"{file_id}.md"))
-    if not candidates:
-        candidates = list((kb / "projects").glob(f"{file_id}.md"))
-    if not candidates:
-        raise FileNotFoundError(f"No knowledge base file for '{file_id}'")
-    file_path = candidates[0]
-    source_type = "experience" if "experience" in str(file_path) else "project"
+    file_id = file_path.stem
 
     # Check for existing L1 drafts
     existing = [
@@ -88,32 +124,35 @@ def stage_l1_generate(ctx: dict, file_id: str, force: bool = False) -> dict:
         if p.generation_level == GenerationLevel.L1 and p.classification.status == Status.DRAFT
     ]
     if existing and not force:
-        print(f"\n[L1] ──► Reusing {len(existing)} existing L1 draft point(s) (force=False)")
+        print(f"\n[L1] ──► Reusing {len(existing)} existing L1 draft(s) for {file_id} (force=False)")
         return {
             "elapsed_s": 0.0,
-            "story_count": 0,  # unknown without re-parsing
+            "story_count": 0,
             "point_count": len(existing),
             "qna_rounds": 0,
             "reused": True,
         }
 
-    # Clear old points for clean run
-    repo._conn.execute("DELETE FROM cv_points WHERE source_file_id = ? AND generation_level = 'l1'", (file_id,))
-    repo._conn.execute("DELETE FROM cv_points WHERE source_file_id = ? AND generation_level = 'l2'", (file_id,))
+    # Clear old points for clean run on this file
+    repo._conn.execute(
+        "DELETE FROM cv_points WHERE source_file_id = ? AND generation_level = 'l1'",
+        (file_id,),
+    )
+    repo._conn.execute(
+        "DELETE FROM cv_points WHERE source_file_id = ? AND generation_level = 'l2'",
+        (file_id,),
+    )
     repo._conn.commit()
 
     client = create_instructor_client(settings)
     engine = GeneratorEngine(client, repo, settings)
 
-    print(f"\n[L1] ──► Generating from {file_path.name} ({source_type})")
+    print(f"\n[L1] ──► {file_path.name} ({source_type})")
     t0 = time.perf_counter()
     result = engine.generate_from_file(file_path, source_type)
     elapsed = time.perf_counter() - t0
 
-    print(f"[L1] ◄── Done in {elapsed:.2f}s")
-    print(f"  Stories: {len(result.story_results)}")
-    print(f"  Points:  {result.total_points}")
-    print(f"  QnA:     {result.total_qna_rounds}")
+    print(f"[L1] ◄── {elapsed:.2f}s | {len(result.story_results)} stories → {result.total_points} points | QnA: {result.total_qna_rounds}")
 
     return {
         "elapsed_s": elapsed,
@@ -125,12 +164,18 @@ def stage_l1_generate(ctx: dict, file_id: str, force: bool = False) -> dict:
 
 
 def stage_l2_batch(ctx: dict, file_id: str) -> dict:
-    """Run L2 Batch Editor on L1 drafts for one file_id.
-
-    Returns dict with timing and result summary.
-    """
+    """Run L2 Batch Editor on L1 drafts for one file_id."""
     settings = ctx["settings"]
     repo = ctx["repo"]
+
+    # Check if there are any L1 drafts to process
+    drafts = [
+        p for p in repo.list_by_source(file_id)
+        if p.generation_level == GenerationLevel.L1 and p.classification.status == Status.DRAFT
+    ]
+    if not drafts:
+        print(f"\n[L2] ──► {file_id}: no L1 drafts to process")
+        return {"elapsed_s": 0.0, "points_in": 0, "points_out": 0, "llm_latency_s": 0.0}
 
     llm_client = create_instructor_client(settings)
     embedder = create_embedder_client()
@@ -141,15 +186,12 @@ def stage_l2_batch(ctx: dict, file_id: str) -> dict:
         settings=settings,
     )
 
-    print(f"\n[L2] ──► Batch finalization for {file_id}")
+    print(f"\n[L2] ──► {file_id}")
     t0 = time.perf_counter()
     result = engine.finalize_file(file_id)
     elapsed = time.perf_counter() - t0
 
-    print(f"[L2] ◄── Done in {elapsed:.2f}s")
-    print(f"  Points in:  {result.points_in}")
-    print(f"  Points out: {result.points_out}")
-    print(f"  LLM time:   {result.total_llm_latency_s:.2f}s")
+    print(f"[L2] ◄── {elapsed:.2f}s | {result.points_in}→{result.points_out} points | LLM: {result.total_llm_latency_s:.2f}s")
 
     return {
         "elapsed_s": elapsed,
@@ -159,14 +201,16 @@ def stage_l2_batch(ctx: dict, file_id: str) -> dict:
     }
 
 
-def stage_verify(ctx: dict, file_id: str) -> dict:
-    """Verify DB state and assert correctness."""
+def stage_verify_all(ctx: dict, file_ids: List[str]) -> dict:
+    """Verify DB state across all processed files."""
     repo = ctx["repo"]
 
-    print(f"\n[VERIFY] Checking DB state for {file_id}")
+    print(f"\n[VERIFY] Checking DB state for {len(file_ids)} file(s)")
     t0 = time.perf_counter()
 
-    all_points = repo.list_by_source(file_id)
+    all_points: list = []
+    for fid in file_ids:
+        all_points.extend(repo.list_by_source(fid))
 
     l1_archived = [
         p for p in all_points
@@ -187,7 +231,6 @@ def stage_verify(ctx: dict, file_id: str) -> dict:
     print(f"  L2 approved: {len(l2_approved)}")
     print(f"  L1 draft:    {len(l1_draft)} (should be 0)")
 
-    # Assertions
     assert len(l1_draft) == 0, f"Expected 0 L1 drafts, found {len(l1_draft)}"
     assert len(l2_approved) > 0, f"Expected >0 L2 approved points, found {len(l2_approved)}"
 
@@ -210,53 +253,85 @@ def stage_verify(ctx: dict, file_id: str) -> dict:
 
 
 def main() -> int:
-    """Run the full pipeline with aggregate timing."""
-    file_id = "01_tata-neu"
+    parser = argparse.ArgumentParser(description="CV-Weaver end-to-end pipeline")
+    parser.add_argument("--fresh", action="store_true", help="Wipe DB and reprocess everything")
+    parser.add_argument("--file", type=str, help="Process one specific file_id only")
+    parser.add_argument("--force", action="store_true", help="Force re-generation even if drafts exist")
+    args = parser.parse_args()
+
     total_t0 = time.perf_counter()
 
     print("=" * 60)
-    print("CV-WEAVER PIPELINE TEST — Components 1 → 2 → 3")
+    print("CV-WEAVER PIPELINE — Components 1 → 2 → 3")
     print("=" * 60)
 
     # Stage 1: Setup
     print("\n▶ STAGE 1: Setup")
-    ctx = stage_setup()
+    ctx = stage_setup(fresh=args.fresh)
+    settings = ctx["settings"]
 
-    # Stage 2: L1 Generation
+    # Resolve files to process
+    kb = Path(settings.knowledge_base_path)
+    if args.file:
+        files_to_process = [resolve_file(kb, args.file)]
+    else:
+        files_to_process = discover_files(kb)
+
+    if not files_to_process:
+        print("\n⚠ No knowledge base files found.")
+        print(f"   Add .md files to {kb / 'experience'} or {kb / 'projects'}")
+        return 1
+
+    print(f"\n  Files to process: {len(files_to_process)}")
+    for fp, st in files_to_process:
+        print(f"    • {fp.name} ({st})")
+
+    # Stage 2: L1 Generation (per file)
     print("\n▶ STAGE 2: L1 Generation")
-    l1_stats = stage_l1_generate(ctx, file_id)
+    l1_results: List[dict] = []
+    for file_path, source_type in files_to_process:
+        stats = stage_l1_generate(ctx, file_path, source_type, force=args.force)
+        l1_results.append(stats)
 
-    # Stage 3: L2 Batch Editor
+    # Stage 3: L2 Batch Editor (per file)
     print("\n▶ STAGE 3: L2 Batch Editor")
-    l2_stats = stage_l2_batch(ctx, file_id)
+    l2_results: List[dict] = []
+    for file_path, _ in files_to_process:
+        stats = stage_l2_batch(ctx, file_path.stem)
+        l2_results.append(stats)
 
-    # Stage 4: Verification
+    # Stage 4: Verification (global)
+    file_ids = [fp.stem for fp, _ in files_to_process]
     print("\n▶ STAGE 4: Verification")
-    verify_stats = stage_verify(ctx, file_id)
+    verify_stats = stage_verify_all(ctx, file_ids)
 
     # Cleanup
     ctx["conn"].close()
 
     # ── Aggregate Summary ───────────────────────────────────────────────
     total_elapsed = time.perf_counter() - total_t0
+    total_l1_time = sum(r["elapsed_s"] for r in l1_results)
+    total_l2_time = sum(r["elapsed_s"] for r in l2_results)
+    total_points_l1 = sum(r["point_count"] for r in l1_results)
+    total_points_l2 = sum(r["points_out"] for r in l2_results)
+    total_qna = sum(r["qna_rounds"] for r in l1_results)
+    total_llm_l2 = sum(r["llm_latency_s"] for r in l2_results)
 
     print()
     print("=" * 60)
     print("PIPELINE SUMMARY")
     print("=" * 60)
-    print(f"{'Stage':<20} {'Wall Time (s)':>15} {'Details'}")
+    print(f"{'Stage':<22} {'Wall Time (s)':>12} {'Details'}")
     print("-" * 60)
-    print(f"{'Setup':<20} {0.0:>15.3f} {'DB init'}")
-    l1_detail = f"{l1_stats['point_count']} points, {l1_stats['qna_rounds']} QnA rounds"
-    if l1_stats.get("reused"):
-        l1_detail = f"{l1_stats['point_count']} points (reused from DB)"
-    print(f"{'L1 Generation':<20} {l1_stats['elapsed_s']:>15.2f} {l1_detail}")
-    print(f"{'L2 Batch Editor':<20} {l2_stats['elapsed_s']:>15.2f} {l2_stats['points_in']}→{l2_stats['points_out']} points")
-    print(f"{'Verification':<20} {verify_stats['elapsed_s']:>15.3f} {verify_stats['l2_approved']} L2 approved")
+    print(f"{'Setup':<22} {0.0:>12.3f} {'DB init'}")
+    print(f"{'L1 Generation':<22} {total_l1_time:>12.2f} {total_points_l1} points, {total_qna} QnA rounds")
+    print(f"{'L2 Batch Editor':<22} {total_l2_time:>12.2f} {verify_stats['l1_archived']}→{verify_stats['l2_approved']} points")
+    print(f"{'  └─ L2 LLM time':<22} {total_llm_l2:>12.2f} {'editorial + judge'}")
+    print(f"{'Verification':<22} {verify_stats['elapsed_s']:>12.3f} {'assertions'}")
     print("-" * 60)
-    print(f"{'TOTAL':<20} {total_elapsed:>15.2f}")
+    print(f"{'TOTAL':<22} {total_elapsed:>12.2f}")
     print("=" * 60)
-    print("\n✓ Pipeline complete. All in-scope components verified.")
+    print(f"\n✓ Pipeline complete. {verify_stats['l2_approved']} approved points across {len(file_ids)} file(s).")
     return 0
 
 
