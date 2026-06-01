@@ -112,6 +112,19 @@ class CVPointRepository:
         ).fetchall()
         return [CVPoint.from_sqlite_row(row) for row in rows]
 
+    def load_approved_embeddings_raw(self) -> List[tuple[str, bytes]]:
+        """Fetch (point_id, embedding_blob) pairs for all approved points.
+
+        Returns:
+            A list of (point_id, embedding_blob) tuples for approved points
+            with non-null embeddings. Used by EmbeddingIndex for fast loading.
+        """
+        rows = self._conn.execute(
+            "SELECT id, embedding FROM cv_points WHERE status = ? AND embedding IS NOT NULL",
+            (Status.APPROVED.value,),
+        ).fetchall()
+        return [(row["id"], row["embedding"]) for row in rows]
+
     def update_embedding(self, point_id: str, embedding_blob: bytes) -> None:
         """Store a pre-normalized embedding BLOB for a CVPoint.
 
