@@ -68,6 +68,10 @@ class CVPointCandidate(BaseModel):
         default_factory=list,
         description="Domain labels for this point, e.g., 'backend', 'fintech'",
     )
+    scope_summary: str = Field(
+        default="",
+        description="1-sentence description of the SPECIFIC accomplishment this candidate covers. Used to scope prober audits so it does not demand coverage of unrelated accomplishments from the same raw story.",
+    )
 
 
 class StoryExtraction(BaseModel):
@@ -120,8 +124,10 @@ class SemanticProberResult(BaseModel):
     """Response model for the L1 Semantic Prober.
 
     The prober compares a draft CVPoint against the raw narrative story
-    to identify semantic gaps: metrics, tech stack, scope, or business
-    impact that the draft omitted or diluted.
+    to identify semantic gaps: metrics, tech stack, scope, business impact,
+    strategic intent, organizational context, leadership scope, cross-functional
+    alignment, logic/reality, jargon/obscurity, and recognition scale that the
+    draft omitted or diluted.
     """
 
     has_semantic_gap: bool = Field(
@@ -129,7 +135,7 @@ class SemanticProberResult(BaseModel):
     )
     gap_categories: List[str] = Field(
         default_factory=list,
-        description="Categories of gaps found: metrics, tech_stack, scope, business, org_scale, leadership_scope, cross_functional, logic_check"
+        description="Categories of gaps found: metrics, tech_stack, scope, business, strategic_intent, org_scale, leadership_scope, cross_functional, logic_check, jargon_obscurity, recognition_scale"
     )
     target_question: str = Field(
         description="A single, hyper-targeted CLI question to ask the user. Must be answerable in one sentence. Empty string if no gap."
@@ -178,6 +184,8 @@ Read the story below. Extract **1 to 3 distinct CVPoint candidates**.
 Each candidate must represent a **separate, concrete accomplishment** from the story.
 Do not create redundant points. If the story only has one strong accomplishment, return one.
 
+**CRITICAL — scope isolation:** Each candidate must cover a SEPARATE, concrete accomplishment. For each candidate, write a `scope_summary` field that describes exactly what that candidate covers (e.g., "core identity and onboarding frontend architecture" or "centralized UI design system using Storybook.js"). The prober will use this to avoid demanding that every candidate contain every detail from the full story.
+
 ## Rubric for Each Candidate — ALL of these fields are MANDATORY
 
 1. **extended_context_situation**
@@ -192,6 +200,8 @@ Do not create redundant points. If the story only has one strong accomplishment,
    - Must be a single, past-tense, high-impact verb.
    - Preferred: Led, Architected, Designed, Built, Engineered, Optimized, Delivered,
      Spearheaded, Implemented, Automated, Reduced, Improved, Scaled.
+   - New categories to consider: Synthesized, Diagnosed, Evaluated, Extracted,
+     Systematized, Streamlined, Centralized, Negotiated, Persuaded, Arbitrated, Facilitated.
    - Avoid: Helped, Assisted, Worked on, Participated in, Was responsible for.
 
 4. **context**
@@ -210,6 +220,9 @@ Do not create redundant points. If the story only has one strong accomplishment,
    - Starts with the action_verb.
    - No pronouns: I, me, my, we, our.
    - No filler words: "successfully", "effectively", "various".
+   - Soft-skill translation: If the story mentions soft skills (communication, teamwork, leadership),
+     do NOT write "strong communicator" or "team player". Translate the skill into the specific
+     action that proved it (e.g., "Aligned 4 cross-functional teams to resolve blockers").
 
 7. **impact_metrics** (JSON array of strings, e.g., `["latency ↓ 60%"]`)
    - Extract or infer specific numbers from the story.
@@ -238,7 +251,8 @@ Return a JSON object with EXACTLY this shape. Every field is required.
       "rendered_bullet": "string (max 200 chars, starts with action_verb)",
       "impact_metrics": ["string"],
       "skills_utilized": ["string"],
-      "domain_tags": ["string"]
+      "domain_tags": ["string"],
+      "scope_summary": "string (1 sentence describing the specific accomplishment this candidate covers)"
     }}
   ],
   "reasoning": "string"
@@ -250,6 +264,13 @@ Return a JSON object with EXACTLY this shape. Every field is required.
 ### {story_title}
 {story_body}{skills_hint}{metrics_hint}{team_hint}{role_hint}{context_block}
 """
+
+
+_ENGINEERING_SCALE_FALLBACK = """If the user still cannot provide exact business metrics, guide them to quantify ENVIRONMENT SCALE instead:
+- Codebase/Data Scale: cluster size, data volume processed, lines of code refactored, number of services.
+- Organizational Scope: repositories managed, deployment frequency, engineering org size impacted.
+- Technical Complexity: APIs integrated, frameworks used, concurrency or load handled.
+Pick the single most impressive and verifiable scale signal."""
 
 
 def refiner_prompt(
@@ -264,6 +285,9 @@ def refiner_prompt(
     The LLM receives the previous draft, the validation flaw that was found,
     the user's answer, and any prior clarifications from earlier rounds.
     It regenerates an improved CVPointCandidate.
+
+    When no metrics exist, a fallback hint is injected to guide the LLM toward
+    engineering-scale dimensions rather than forcing hallucinated business outcomes.
     """
     context_block = (
         f"\n## Overall Role Context\n{context_paragraph}\n"
@@ -271,13 +295,23 @@ def refiner_prompt(
         else ""
     )
 
+    # Cap history to last 2 rounds to prevent prompt bloat and LLM confusion
+    capped_clarifications = (prior_clarifications or [])[-2:]
     history_block = ""
-    if prior_clarifications:
+    if capped_clarifications:
         history_block = (
-            "## Previous Clarifications\n"
-            + "\n".join(f"- {c}" for c in prior_clarifications)
+            "## Previous Clarifications (last 2 rounds)\n"
+            + "\n".join(f"- {c}" for c in capped_clarifications)
             + "\n"
         )
+
+    # Inject engineering-scale fallback when metrics are missing and the flaw is metric-related
+    metrics_fallback = ""
+    if (
+        not previous_candidate.impact_metrics
+        and "metric" in flaw_description.lower()
+    ):
+        metrics_fallback = f"\n## Engineering Scale Fallback\n{_ENGINEERING_SCALE_FALLBACK}\n"
 
     return f"""You are a senior technical resume writer refining a CV bullet point.
 
@@ -293,7 +327,7 @@ def refiner_prompt(
 - **metrics**: {', '.join(previous_candidate.impact_metrics) or 'none'}
 
 ## Issue to Fix
-{flaw_description}
+{flaw_description}{metrics_fallback}
 
 ## User's Input
 "{user_answer}"
@@ -302,22 +336,59 @@ def refiner_prompt(
 Regenerate the CV point incorporating the user's input.
 You may modify any field. Preserve what was already strong. Fix only the issue.
 Do NOT drop data from previous clarifications — retain every improvement made so far.
+Do NOT merge accomplishments from other candidates into this bullet. Only refine the CURRENT bullet's scope. If the user's answer mentions work from a different candidate, ignore it and focus on improving this bullet only.
 
-Return a JSON object matching the RefinedPoint schema with:
-- refined: the updated CVPointCandidate
-- what_changed: specifically what you modified{context_block}
+## Output Format
+Return **ONLY** a JSON object with this EXACT top-level shape. Do NOT return a list. Do NOT return the fields flat.
+
+```json
+{{
+  "refined": {{
+    "extended_context_situation": "string",
+    "extended_context_task": "string",
+    "action_verb": "string",
+    "context": "string",
+    "result": "string",
+    "rendered_bullet": "string (max 200 chars, starts with action_verb)",
+    "impact_metrics": ["string"],
+    "skills_utilized": ["string"],
+    "domain_tags": ["string"]
+  }},
+  "what_changed": "string"
+}}
+```
+
+**CRITICAL:** The top-level keys MUST be `"refined"` and `"what_changed"`. The candidate data lives INSIDE `"refined"`.{context_block}
 """
 
 
 def judge_prompt(
     candidate: CVPointCandidate,
     story_title: str,
+    source_type: str = "experience",
 ) -> str:
     """Build the L1 Judge prompt.
 
     The LLM receives a finalized CVPointCandidate (after QnA convergence)
     and evaluates it against a rubric. It is blind to authorship.
+
+    Args:
+        source_type: "experience" or "project". When "project", Dimension 4
+            evaluates "Technical Complexity & Adoption" instead of "Business Outcome".
     """
+    if source_type == "project":
+        d4_rubric = """### Dimension 4: Technical Complexity & Adoption (0–2)
+- 2 = Demonstrates significant technical depth AND evidence of adoption/wins (e.g., hackathon placement, active users/downloads, grant funding, complex framework integration, lines of code refactored)
+- 1 = Technical work described but no evidence of complexity or adoption (e.g., "built a React app" with no scale or outcome)
+- 0 = No technical outcome or adoption signal stated"""
+        d4_name = "Technical Complexity & Adoption"
+    else:
+        d4_rubric = """### Dimension 4: Business Outcome (0–2)
+- 2 = Clear link to revenue, cost, risk reduction, or user experience
+- 1 = Technical outcome stated but business link missing
+- 0 = No outcome stated (only describes what was done)"""
+        d4_name = "Business Outcome"
+
     return f"""You are an independent resume reviewer. You did NOT write this bullet.
 You are evaluating a CV bullet point as if reviewing a portfolio from a stranger.
 Be critical. A 10/10 is rare.
@@ -325,6 +396,7 @@ Be critical. A 10/10 is rare.
 ## Bullet to Evaluate
 
 **Title**: {story_title}
+**Source Type**: {source_type}
 
 **rendered_bullet**: {candidate.rendered_bullet}
 **action_verb**: {candidate.action_verb}
@@ -352,10 +424,7 @@ Be critical. A 10/10 is rare.
 - 1 = Implied scope but not explicit ("production system" without scale)
 - 0 = No scope signal at all
 
-### Dimension 4: Business Outcome (0–2)
-- 2 = Clear link to revenue, cost, risk reduction, or user experience
-- 1 = Technical outcome stated but business link missing
-- 0 = No outcome stated (only describes what was done)
+{d4_rubric}
 
 ### Dimension 5: ATS & Keyword Formatting (0–2)
 - 2 = Flawless: skills embedded naturally in prose, acronyms expanded on first use, no pronouns, no keyword stuffing
@@ -371,12 +440,27 @@ Be critical. A 10/10 is rare.
 - completeness_score = sum of all dimensions (0–12, then clamped 0–10)
   * Raw sum of D1–D5, clamped to a maximum of 10.
 
-## Output
-Return a JSON object matching the PointEvaluation schema with:
-- dimension_scores: list with reasoning for each
-- impact_score, ats_score, completeness_score
-- overall_reasoning: summary of strengths and weaknesses
-- specific_suggestions: concrete improvements (empty if none)
+## Output Format
+Return **ONLY** a JSON object with this EXACT shape. Do NOT return a list at the top level.
+
+```json
+{{
+  "dimension_scores": [
+    {{"dimension": "Dimension 1: Quantification", "score": 0, "reasoning": "string"}},
+    {{"dimension": "Dimension 2: Action Clarity", "score": 0, "reasoning": "string"}},
+    {{"dimension": "Dimension 3: Scope Signal", "score": 0, "reasoning": "string"}},
+    {{"dimension": "Dimension 4: {d4_name}", "score": 0, "reasoning": "string"}},
+    {{"dimension": "Dimension 5: ATS & Keyword Formatting", "score": 0, "reasoning": "string"}}
+  ],
+  "impact_score": 0,
+  "ats_score": 0,
+  "completeness_score": 0,
+  "overall_reasoning": "string",
+  "specific_suggestions": ["string"]
+}}
+```
+
+**CRITICAL:** Each `dimension_scores` item MUST have `"dimension"` as a string, `"score"` as an integer 0–3, and `"reasoning"` as a string. The `dimension` field must be the exact dimension name shown above.
 """
 
 
@@ -390,12 +474,23 @@ def prober_prompt(
     The LLM receives the full raw story + the current draft candidate,
     then identifies semantic gaps where the draft left technical depth,
     metrics, or scale on the table.
+
+    **Scope isolation:** The candidate's ``scope_summary`` tells the prober
+    which specific accomplishment to audit. The prober must NOT demand
+    coverage of other distinct accomplishments from the same raw story.
     """
+    scope_hint = f"""## Candidate Scope
+This candidate covers: {candidate.scope_summary or "(unspecified — audit against the full story)"}
+
+**CRITICAL INSTRUCTION:** The raw story may contain MULTIPLE distinct accomplishments. You must ONLY audit gaps WITHIN the candidate's scope above. Do NOT flag that the draft omits other accomplishments from the raw story. For example, if the scope is "UI design system," do NOT complain that the draft omits "identity and onboarding architecture." Those are separate accomplishments.
+""" if candidate.scope_summary else ""
+
     return f"""## Raw Story (Narrative)
 
 ### {story_title}
 {story_body}
 
+{scope_hint}
 ## Draft CV Point
 
 - **rendered_bullet**: {candidate.rendered_bullet}
@@ -407,12 +502,20 @@ def prober_prompt(
 - **domain_tags**: {', '.join(candidate.domain_tags) or 'none'}
 
 ## Task
-Compare the DRAFT against the RAW STORY. Identify every piece of technical depth, quantified impact, scale signal, or business linkage that appears in or is strongly implied by the raw story but is MISSING, DILUTED, or VAGUE in the draft.
+Compare the DRAFT against the RAW STORY, but ONLY within the candidate's scope above. Identify every piece of technical depth, quantified impact, scale signal, business linkage, strategic intent, jargon/obscurity, or recognition scale that appears in or is strongly implied by the raw story WITHIN THIS SCOPE but is MISSING, DILUTED, or VAGUE in the draft.
 
-Return a JSON object matching the SemanticProberResult schema with:
-- has_semantic_gap: true if any gap exists
-- gap_categories: list of categories where gaps were found
-- target_question: a single hyper-specific CLI question to ask the user (empty if no gap)
-- what_is_missing: detailed gap description for the Refiner (empty if no gap)
-- confidence: 0–10 certainty score
+## Output Format
+Return **ONLY** a JSON object with this EXACT shape:
+
+```json
+{{
+  "has_semantic_gap": true,
+  "gap_categories": ["metrics", "tech_stack", "scope", "business", "strategic_intent", "org_scale", "leadership_scope", "cross_functional", "logic_check", "jargon_obscurity", "recognition_scale"],
+  "target_question": "string (one hyper-specific sentence, empty if no gap)",
+  "what_is_missing": "string (detailed gap description, empty if no gap)",
+  "confidence": 8
+}}
+```
+
+**CRITICAL:** `confidence` MUST be an integer between 0 and 10 (e.g., 7, 8, 9). Do NOT use fractional values like 7.5 or 8.2.
 """

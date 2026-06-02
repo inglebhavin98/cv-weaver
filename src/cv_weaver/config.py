@@ -18,6 +18,7 @@ class Settings(BaseModel):
     judge_model: str = Field(default="glm-5.1:cloud")
     embedding_model: str = Field(default="nomic-embed-text")
     redundancy_threshold: float = Field(default=0.85)
+    use_structured_outputs: bool = Field(default=False, description="Pass Pydantic JSON Schema to Ollama format= (experimental, requires Ollama >= 0.4.x).")
     database_path: Path = Field(default=Path("data/cv_weaver.db"))
     knowledge_base_path: Path = Field(default=Path("data/knowledge_base"))
     output_path: Path = Field(default=Path("data/outputs"))
@@ -45,6 +46,7 @@ def load_settings(env_file: Path | str = ".env") -> Settings:
         "JUDGE_MODEL": "judge_model",
         "EMBEDDING_MODEL": "embedding_model",
         "REDUNDANCY_THRESHOLD": "redundancy_threshold",
+        "USE_STRUCTURED_OUTPUTS": "use_structured_outputs",
         "DATABASE_PATH": "database_path",
         "KNOWLEDGE_BASE_PATH": "knowledge_base_path",
         "OUTPUT_PATH": "output_path",

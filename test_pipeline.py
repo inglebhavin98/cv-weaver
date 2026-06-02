@@ -39,8 +39,6 @@ def _smart_input(prompt: str) -> str:
     return "skip"
 
 
-builtins.input = _smart_input
-
 # ─── Imports ────────────────────────────────────────────────────────────
 
 from cv_weaver.config import load_settings
@@ -111,25 +109,43 @@ def stage_l1_generate(
 ) -> dict:
     """Run L1 generation on one knowledge base file.
 
-    If force=False and valid L1 drafts already exist, skip re-generation
-    to save time when debugging downstream stages.
+    Checkpoint logic:
+    - If L2 approved points already exist and force=False → skip entirely.
+    - If L1 drafts already exist and force=False → skip L1, return reused.
+    - Otherwise → clear old points and regenerate.
     """
     settings = ctx["settings"]
     repo = ctx["repo"]
     file_id = file_path.stem
 
-    # Check for existing L1 drafts
+    # CHECKPOINT 1: Already fully processed (L2 approved exists)
+    l2_approved_count = repo.count_by_source_and_level_status(
+        file_id, GenerationLevel.L2, Status.APPROVED
+    )
+    if l2_approved_count > 0 and not force:
+        print(f"\n[CHECKPOINT] {file_id}: already has {l2_approved_count} L2 approved point(s). Skipping L1+L2.")
+        return {
+            "elapsed_s": 0.0,
+            "story_count": 0,
+            "point_count": l2_approved_count,
+            "qna_rounds": 0,
+            "semantic_rounds": 0,
+            "skipped": True,
+        }
+
+    # CHECKPOINT 2: L1 drafts already exist → reuse for L2
     existing = [
         p for p in repo.list_by_source(file_id)
         if p.generation_level == GenerationLevel.L1 and p.classification.status == Status.DRAFT
     ]
     if existing and not force:
-        print(f"\n[L1] ──► Reusing {len(existing)} existing L1 draft(s) for {file_id} (force=False)")
+        print(f"\n[CHECKPOINT] {file_id}: reusing {len(existing)} existing L1 draft(s). Skipping L1 generation.")
         return {
             "elapsed_s": 0.0,
             "story_count": 0,
             "point_count": len(existing),
             "qna_rounds": 0,
+            "semantic_rounds": 0,
             "reused": True,
         }
 
@@ -152,13 +168,14 @@ def stage_l1_generate(
     result = engine.generate_from_file(file_path, source_type)
     elapsed = time.perf_counter() - t0
 
-    print(f"[L1] ◄── {elapsed:.2f}s | {len(result.story_results)} stories → {result.total_points} points | QnA: {result.total_qna_rounds}")
+    print(f"[L1] ◄── {elapsed:.2f}s | {len(result.story_results)} stories → {result.total_points} points | QnA: {result.total_qna_rounds} (semantic: {result.total_semantic_rounds})")
 
     return {
         "elapsed_s": elapsed,
         "story_count": len(result.story_results),
         "point_count": result.total_points,
         "qna_rounds": result.total_qna_rounds,
+        "semantic_rounds": result.total_semantic_rounds,
         "reused": False,
     }
 
@@ -167,6 +184,14 @@ def stage_l2_batch(ctx: dict, file_id: str) -> dict:
     """Run L2 Batch Editor on L1 drafts for one file_id."""
     settings = ctx["settings"]
     repo = ctx["repo"]
+
+    # CHECKPOINT: Already has L2 approved points → skip
+    l2_approved_count = repo.count_by_source_and_level_status(
+        file_id, GenerationLevel.L2, Status.APPROVED
+    )
+    if l2_approved_count > 0:
+        print(f"\n[CHECKPOINT] {file_id}: already has {l2_approved_count} L2 approved point(s). Skipping L2.")
+        return {"elapsed_s": 0.0, "points_in": 0, "points_out": l2_approved_count, "llm_latency_s": 0.0, "skipped": True}
 
     # Check if there are any L1 drafts to process
     drafts = [
@@ -252,12 +277,52 @@ def stage_verify_all(ctx: dict, file_ids: List[str]) -> dict:
 # ─── Main Orchestrator ──────────────────────────────────────────────────
 
 
+def stage_print_bullets(ctx: dict, file_ids: List[str]) -> None:
+    """Query the DB and print all L2 approved bullets in a clean, copy-pasteable format."""
+    repo = ctx["repo"]
+    print("\n" + "=" * 70)
+    print("APPROVED CV BULLETS")
+    print("=" * 70)
+
+    for fid in file_ids:
+        points = [
+            p for p in repo.list_by_source(fid)
+            if p.generation_level == GenerationLevel.L2 and p.classification.status == Status.APPROVED
+        ]
+        if not points:
+            continue
+
+        # Sort by impact score descending
+        points.sort(key=lambda p: p.scores.impact_score, reverse=True)
+
+        # Extract company from file_id or point source
+        company = fid.replace("-", " ").title()
+
+        print(f"\n📄 {fid}  ({len(points)} point(s))")
+        print("-" * 70)
+        for i, p in enumerate(points, start=1):
+            scores = f"impact={p.scores.impact_score} ats={p.scores.ats_score} complete={p.scores.completeness_score}"
+            print(f"  {i}. [{scores}] {p.rendered_bullet}")
+
+    print("\n" + "=" * 70)
+    print("Tip: Run with --no-auto-skip to answer QnA questions interactively")
+    print("     and improve low-score bullets (e.g., 5/5/5 → 9/9/9).")
+    print("=" * 70)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="CV-Weaver end-to-end pipeline")
     parser.add_argument("--fresh", action="store_true", help="Wipe DB and reprocess everything")
     parser.add_argument("--file", type=str, help="Process one specific file_id only")
     parser.add_argument("--force", action="store_true", help="Force re-generation even if drafts exist")
+    parser.add_argument("--no-auto-skip", action="store_true", help="Answer QnA questions interactively instead of auto-skipping")
     args = parser.parse_args()
+
+    # Toggle auto-skip based on CLI flag
+    if not args.no_auto_skip:
+        builtins.input = _smart_input
+    else:
+        print("\n⚡ INTERACTIVE MODE: You will be asked QnA questions. Type 'skip' to accept as-is.")
 
     total_t0 = time.perf_counter()
 
@@ -305,6 +370,10 @@ def main() -> int:
     print("\n▶ STAGE 4: Verification")
     verify_stats = stage_verify_all(ctx, file_ids)
 
+    # Stage 5: Print approved bullets
+    print("\n▶ STAGE 5: Print Approved Bullets")
+    stage_print_bullets(ctx, file_ids)
+
     # Cleanup
     ctx["conn"].close()
 
@@ -315,7 +384,13 @@ def main() -> int:
     total_points_l1 = sum(r["point_count"] for r in l1_results)
     total_points_l2 = sum(r["points_out"] for r in l2_results)
     total_qna = sum(r["qna_rounds"] for r in l1_results)
+    total_semantic = sum(r["semantic_rounds"] for r in l1_results)
     total_llm_l2 = sum(r["llm_latency_s"] for r in l2_results)
+
+    # Count skipped/reused files for visibility
+    skipped_l1 = sum(1 for r in l1_results if r.get("skipped"))
+    reused_l1 = sum(1 for r in l1_results if r.get("reused"))
+    skipped_l2 = sum(1 for r in l2_results if r.get("skipped"))
 
     print()
     print("=" * 60)
@@ -324,8 +399,16 @@ def main() -> int:
     print(f"{'Stage':<22} {'Wall Time (s)':>12} {'Details'}")
     print("-" * 60)
     print(f"{'Setup':<22} {0.0:>12.3f} {'DB init'}")
-    print(f"{'L1 Generation':<22} {total_l1_time:>12.2f} {total_points_l1} points, {total_qna} QnA rounds")
-    print(f"{'L2 Batch Editor':<22} {total_l2_time:>12.2f} {verify_stats['l1_archived']}→{verify_stats['l2_approved']} points")
+    l1_detail = f"{total_points_l1} points, {total_qna} QnA rounds ({total_semantic} semantic)"
+    if skipped_l1:
+        l1_detail += f", {skipped_l1} skipped"
+    if reused_l1:
+        l1_detail += f", {reused_l1} reused"
+    print(f"{'L1 Generation':<22} {total_l1_time:>12.2f} {l1_detail}")
+    l2_detail = f"{verify_stats['l1_archived']}→{verify_stats['l2_approved']} points"
+    if skipped_l2:
+        l2_detail += f", {skipped_l2} skipped"
+    print(f"{'L2 Batch Editor':<22} {total_l2_time:>12.2f} {l2_detail}")
     print(f"{'  └─ L2 LLM time':<22} {total_llm_l2:>12.2f} {'editorial + judge'}")
     print(f"{'Verification':<22} {verify_stats['elapsed_s']:>12.3f} {'assertions'}")
     print("-" * 60)

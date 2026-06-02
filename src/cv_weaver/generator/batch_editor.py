@@ -66,14 +66,14 @@ class PointAction(BaseModel):
         )
     )
     action: str = Field(
-        description="Editorial action: keep, merge, split, or drop."
+        description="Editorial action: keep or drop."
     )
     target_l1_ids: List[str] = Field(
         description="IDs of the L1 points this action applies to."
     )
     new_cv_point: Optional[CVPointCandidate] = Field(
         default=None,
-        description="The regenerated point if action is merge or split. Null for keep/drop.",
+        description="DEPRECATED: always null. The L2 editor only keeps or drops existing L1 points.",
     )
 
 
@@ -109,7 +109,9 @@ Your job is to ensure the final set of bullets is:
 - CONCISE: drop weak or filler bullets that add no distinct value
 - WELL-FORMED: each bullet starts with a strong past-tense verb, has metrics, and is under 200 chars
 
-CRITICAL INSTRUCTION: For every PointAction, you MUST explain your reasoning step-by-step in the 'editorial_reasoning' field BEFORE outputting the action or any new point. The reasoning must come first in your thought process.
+CRITICAL: Your role is REVIEW and SELECT, not REWRITE. You may only KEEP a point as-is or DROP it entirely. You do NOT create new bullets, merge bullets, or split bullets. The L1 drafter already produced the best possible bullets; your job is to curate which ones make the final cut.
+
+CRITICAL INSTRUCTION: For every PointAction, you MUST explain your reasoning step-by-step in the 'editorial_reasoning' field BEFORE outputting the action. The reasoning must come first in your thought process.
 """
 
 
@@ -160,13 +162,9 @@ def editorial_prompt(
 ## Editorial Rules
 
 1. **keep** — Use when a point is strong, distinct, and needs no change.
-   - new_cv_point must be null.
-2. **merge** — Use when two or more points describe the same accomplishment or have overlapping scope. Produce a single stronger bullet that combines the best metrics and context from both.
-   - new_cv_point must contain the merged bullet.
-3. **split** — Use when one point actually contains two distinct accomplishments that should stand alone. Use ONE PointAction per resulting bullet.
-   - Each split action targets the SAME original L1 ID and provides one new_cv_point.
-4. **drop** — Use when a point is weak, redundant, or adds no value compared to others.
-   - new_cv_point must be null.
+2. **drop** — Use when a point is weak, redundant, or adds no value compared to others.
+
+You do NOT merge, split, rewrite, or create new bullets. Only keep or drop existing ones.
 
 **Constraints:**
 - Every significant accomplishment must be represented in the final set.
@@ -304,6 +302,13 @@ class BatchEditorEngine:
                 )
                 continue
 
+            if action.action not in ("keep", "drop"):
+                print(
+                    f"[L2-BATCH] SKIP ids={action.target_l1_ids} — "
+                    f"unsupported action '{action.action}' (L2 editor only supports keep/drop)"
+                )
+                continue
+
             final_point = self._build_final_point(action, l1_points)
             if final_point is None:
                 print(
@@ -311,30 +316,6 @@ class BatchEditorEngine:
                     "could not build point from action"
                 )
                 continue
-
-            # Structural validation for merge/split: auto-refiner if blocking
-            if action.action in ("merge", "split") and action.new_cv_point:
-                parent_id = action.target_l1_ids[0]
-                source_l1 = next(
-                    (p for p in l1_points if p.id == parent_id), l1_points[0]
-                )
-                temp_point = self._candidate_to_temp_cvpoint(
-                    action.new_cv_point, source_l1
-                )
-                violations = [rule(temp_point) for rule in POINT_LEVEL_RULES]
-                blocking = [v for v in violations if not v.passed and v.is_blocking]
-                if blocking:
-                    print(
-                        f"[L2-BATCH] STRUCTURAL FAIL on {action.action} "
-                        f"({', '.join(v.name for v in blocking)}). Auto-refining..."
-                    )
-                    fixed = self._auto_refiner_fix(
-                        action.new_cv_point, blocking, source_l1
-                    )
-                    # Rebuild final_point with the fixed candidate
-                    final_point = self._candidate_to_l2(
-                        fixed, parent_id=parent_id, source_l1=source_l1
-                    )
 
             # Sanitize for machine parsers (ATS, YAML, LaTeX)
             final_point.rendered_bullet = sanitize_for_machine_parsers(
@@ -439,9 +420,7 @@ class BatchEditorEngine:
 
         for idx, action in enumerate(actions, start=1):
             bullet_preview = ""
-            if action.new_cv_point:
-                bullet_preview = f" → '{action.new_cv_point.rendered_bullet[:60]}...'"
-            elif action.action == "keep" and action.target_l1_ids:
+            if action.action == "keep" and action.target_l1_ids:
                 orig = l1_by_id.get(action.target_l1_ids[0])
                 if orig:
                     bullet_preview = f" → keep '{orig.rendered_bullet[:60]}...'"
@@ -599,7 +578,7 @@ class BatchEditorEngine:
         action: PointAction,
         l1_points: List[CVPoint],
     ) -> Optional[CVPoint]:
-        """Build a final CVPoint from an editorial action."""
+        """Build a final CVPoint from an editorial action (keep only)."""
         if not action.target_l1_ids:
             return None
 
@@ -609,17 +588,6 @@ class BatchEditorEngine:
             if l1 is None:
                 return None
             return self._clone_as_l2(l1, parent_id=l1.id)
-
-        if action.action in ("merge", "split"):
-            if action.new_cv_point is None:
-                return None
-            parent_id = action.target_l1_ids[0]
-            source_l1 = next(
-                (p for p in l1_points if p.id == parent_id), l1_points[0]
-            )
-            return self._candidate_to_l2(
-                action.new_cv_point, parent_id=parent_id, source_l1=source_l1
-            )
 
         return None
 

@@ -50,18 +50,42 @@ class LLMClient:
         self._settings = settings
         self._model = settings.generation_model
 
+        # Structured Outputs experiment: tri-state flag
+        # None = untried, True = supported, False = unsupported (fall back to json)
+        self._schema_supported: bool | None = (
+            True if settings.use_structured_outputs else False
+        )
+
         headers: dict[str, str] = {}
         if settings.ollama_api_key and settings.ollama_api_key != "ollama":
             headers["Authorization"] = f"Bearer {settings.ollama_api_key}"
 
-        # The native Ollama API uses /api/chat, not /v1/chat/completions.
-        # If the user configured an OpenAI-compatible URL (e.g. ollama.com/v1),
-        # strip the /v1 suffix so the native client hits the right path.
         host = str(settings.ollama_base_url).rstrip("/")
         if host.endswith("/v1"):
             host = host[:-3]
 
         self._client = ollama.Client(host=host, headers=headers, timeout=300.0)
+
+    def _call_with_format(
+        self,
+        model_name: str,
+        messages: list,
+        fmt: str | dict | None = None,
+    ) -> str:
+        """Make a single streaming chat call and return the concatenated content.
+
+        Wraps the ollama client call. The ``fmt`` parameter is only passed when
+        ``settings.use_structured_outputs`` is True, since ``format='json'``
+        can cause empty responses on some cloud models.
+        """
+        kwargs: dict = {"model": model_name, "messages": messages, "stream": True}
+        if fmt is not None:
+            kwargs["format"] = fmt
+        stream = self._client.chat(**kwargs)
+        content = ""
+        for chunk in stream:
+            content += chunk["message"]["content"]
+        return content
 
     def chat_completion(
         self,
@@ -75,10 +99,15 @@ class LLMClient:
         Uses streaming to avoid httpx read-timeout on long generations.
         Retries up to 3 times if the model returns malformed JSON.
 
+        When ``settings.use_structured_outputs`` is True, the first call for each
+        response model will try passing the Pydantic JSON Schema to Ollama's
+        ``format=`` parameter. If the endpoint rejects it, we fall back to
+        unconstrained generation and remember the failure so future calls skip
+        the trial.
+
         IMPORTANT — learned from kimi-k2.6 on Ollama Cloud:
         - `stream=True` is required: the timeout resets per chunk, so a 300s
           total generation does not trigger a ReadTimeout.
-        - `format='json'` makes generation slower AND adds markdown fences.
         - `options={"num_predict": N}` causes EMPTY output for this model.
           Do NOT add token caps via ollama options for cloud models.
 
@@ -110,30 +139,48 @@ class LLMClient:
             {"role": "user", "content": prompt},
         ]
 
+        # Determine which format value to use.
+        # If structured outputs are enabled and we haven't confirmed the endpoint
+        # doesn't support schemas, try the Pydantic schema first.
+        use_schema = self._schema_supported is True  # True = try, False/None = don't
+        schema = response_model.model_json_schema() if use_schema else None
+
         last_error = ""
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
-                # Stream so timeout resets per chunk instead of bounding total generation time.
-                stream = self._client.chat(
-                    model=model_name,
-                    messages=messages,
-                    stream=True,
-                )
-                content = ""
-                for chunk in stream:
-                    content += chunk["message"]["content"]
+                if use_schema and schema is not None:
+                    content = self._call_with_format(model_name, messages, schema)
+                else:
+                    content = self._call_with_format(model_name, messages, None)
+
+                # Guard against completely empty responses
+                if not content.strip():
+                    raise json.JSONDecodeError("Model returned empty output", "", 0)
 
                 parsed = self._extract_json(content)
                 result = response_model.model_validate_json(parsed)
                 elapsed = time.perf_counter() - t0
                 print(f"    [LLM] DONE  {response_model.__name__:25s} in {elapsed:.2f}s (attempt {attempt}, {len(content)} chars)")
                 return result
+            except ollama.ResponseError as exc:
+                # Endpoint-level error (e.g., unsupported format parameter).
+                # If we were trying schema, fall back to unconstrained generation
+                # WITHOUT burning a retry attempt.
+                if use_schema and schema is not None:
+                    print(f"    [LLM] Schema format rejected by endpoint: {exc}. Disabling structured outputs.")
+                    self._schema_supported = False
+                    use_schema = False
+                    schema = None
+                    continue  # retry same attempt number with no format constraint
+                # Otherwise it's a real endpoint error — raise it.
+                elapsed = time.perf_counter() - t0
+                print(f"    [LLM] FAIL  {response_model.__name__:25s} after {elapsed:.2f}s: {exc}")
+                raise
             except (ValidationError, json.JSONDecodeError, KeyError) as exc:
                 last_error = str(exc)
                 print(f"    [LLM] RETRY {response_model.__name__:25s} attempt {attempt}/{self._MAX_RETRIES}: {last_error[:120]}")
-                # Append the error to the conversation so the model can self-correct.
                 messages.append(
-                    {"role": "user", "content": f"That was not valid JSON. Error: {last_error}. Please return ONLY raw JSON."}
+                    {"role": "user", "content": f"That was not valid JSON. Error: {last_error}. Please return ONLY raw JSON matching the schema exactly."}
                 )
             except Exception as exc:
                 elapsed = time.perf_counter() - t0

@@ -83,14 +83,27 @@ def no_pronouns(point: CVPoint) -> RuleResult:
     )
 
 
+_METRIC_FALLBACK_HINT = """If you do not have exact business outcomes, quantify the ENVIRONMENT SCALE instead:
+- Codebase/Data Scale: cluster size (e.g., "15-node cluster"), data volume (e.g., "400 GB/day"), lines of code refactored, number of services.
+- Organizational Scope: repositories managed, deployment frequency (e.g., "hourly CI/CD"), size of engineering org impacted, number of teams onboarded.
+- Technical Complexity: number of APIs integrated, frameworks used, concurrency/load handled.
+
+Pick the ONE most impressive scale signal you can verify."""
+
+
 def has_metrics_or_flagged(point: CVPoint) -> RuleResult:
-    """Bullet must contain quantifiable metrics. Blocking — saves an LLM prober call."""
+    """Bullet must contain quantifiable metrics. Blocking — saves an LLM prober call.
+
+    When no metrics exist, the fallback asks for Engineering Scale dimensions
+    (codebase/data scale, org scope, technical complexity) rather than vague
+    business metrics the user may not have access to.
+    """
     passed = point.has_metrics
     return RuleResult(
         name="has_metrics_or_flagged",
         passed=passed,
         message="Bullet contains metrics." if passed else "Bullet has no quantifiable metrics.",
-        suggestion=None if passed else "Can you quantify the result? (e.g., saved 10 hours/week, increased efficiency by 15%, reduced latency by 60%)",
+        suggestion=None if passed else _METRIC_FALLBACK_HINT,
         is_blocking=True,
     )
 
@@ -124,6 +137,22 @@ def strong_action_verb(point: CVPoint) -> RuleResult:
     )
 
 
+def has_skills_or_flagged(point: CVPoint) -> RuleResult:
+    """Bullet must mention at least one technology or skill. Blocking.
+
+    A CV point with zero skills_utilized is a red flag — either the user
+    forgot to list technologies, or the drafter failed to extract them.
+    """
+    passed = len(point.metadata.skills_utilized) > 0
+    return RuleResult(
+        name="has_skills_or_flagged",
+        passed=passed,
+        message=f"Bullet lists {len(point.metadata.skills_utilized)} skill(s)." if passed else "Bullet has no listed skills or technologies.",
+        suggestion=None if passed else "List the specific technologies, frameworks, languages, or tools used (e.g., ReactJS, Redux, Storybook.js).",
+        is_blocking=True,
+    )
+
+
 # Ordered list of point-level BLOCKING rules.
 # Structural validator enforces hard constraints (format, grammar, metrics, verb strength).
 # The Semantic Prober LLM handles deeper semantic gaps (scope, business linkage, etc.).
@@ -132,6 +161,7 @@ POINT_LEVEL_RULES: List = [
     under_200_chars,
     no_pronouns,
     has_metrics_or_flagged,
+    has_skills_or_flagged,
     strong_action_verb,
 ]
 

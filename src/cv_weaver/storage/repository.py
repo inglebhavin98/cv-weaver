@@ -125,6 +125,22 @@ class CVPointRepository:
         ).fetchall()
         return [(row["id"], row["embedding"]) for row in rows]
 
+    def count_by_source_and_level_status(
+        self,
+        file_id: str,
+        level: GenerationLevel,
+        status: Status,
+    ) -> int:
+        """Count CVPoints for a source file matching a generation level and status.
+
+        Used by the pipeline checkpoint logic to skip already-processed files.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM cv_points WHERE source_file_id = ? AND generation_level = ? AND status = ?",
+            (file_id, level.value, status.value),
+        ).fetchone()
+        return row[0] if row else 0
+
     def update_embedding(self, point_id: str, embedding_blob: bytes) -> None:
         """Store a pre-normalized embedding BLOB for a CVPoint.
 
