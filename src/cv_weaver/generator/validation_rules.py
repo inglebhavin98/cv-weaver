@@ -19,12 +19,23 @@ from cv_weaver.models.schemas import CVPoint
 
 @dataclass(frozen=True)
 class RuleResult:
-    """Outcome of a single validation rule."""
+    """Outcome of a single validation rule.
+
+    Attributes:
+        name: Machine-readable rule identifier.
+        passed: Whether the rule passed.
+        message: Human-readable explanation.
+        suggestion: Guidance for fixing the violation.
+        is_blocking: If False, the user may decline the suggestion and proceed.
+            Blocking rules (pronouns, length, verb-start) MUST be fixed.
+            Non-blocking rules (metric suggestion) trigger a question but are optional.
+    """
 
     name: str
     passed: bool
     message: str
     suggestion: Optional[str] = None
+    is_blocking: bool = True
 
 
 # ─── Point-Level Rules ─────────────────────────────────────────────────
@@ -72,23 +83,86 @@ def no_pronouns(point: CVPoint) -> RuleResult:
     )
 
 
+_METRIC_FALLBACK_HINT = """If you do not have exact business outcomes, quantify the ENVIRONMENT SCALE instead:
+- Codebase/Data Scale: cluster size (e.g., "15-node cluster"), data volume (e.g., "400 GB/day"), lines of code refactored, number of services.
+- Organizational Scope: repositories managed, deployment frequency (e.g., "hourly CI/CD"), size of engineering org impacted, number of teams onboarded.
+- Technical Complexity: number of APIs integrated, frameworks used, concurrency/load handled.
+
+Pick the ONE most impressive scale signal you can verify."""
+
+
 def has_metrics_or_flagged(point: CVPoint) -> RuleResult:
-    """ Bullet should ideally contain quantifiable metrics. """
+    """Bullet must contain quantifiable metrics. Blocking — saves an LLM prober call.
+
+    When no metrics exist, the fallback asks for Engineering Scale dimensions
+    (codebase/data scale, org scope, technical complexity) rather than vague
+    business metrics the user may not have access to.
+    """
     passed = point.has_metrics
     return RuleResult(
         name="has_metrics_or_flagged",
         passed=passed,
         message="Bullet contains metrics." if passed else "Bullet has no quantifiable metrics.",
-        suggestion=None if passed else "Add numbers, percentages, or dollar amounts to the result.",
+        suggestion=None if passed else _METRIC_FALLBACK_HINT,
+        is_blocking=True,
     )
 
 
-# Ordered list of all point-level rules. The validator runs these in order.
+WEAK_VERBS = {
+    "helped",
+    "assisted",
+    "participated",
+    "worked",
+    "was",
+    "were",
+    "involved",
+    "contributed",
+    "supported",
+    "handled",
+    "did",
+    "responsible",
+}
+
+
+def strong_action_verb(point: CVPoint) -> RuleResult:
+    """action_verb must be high-impact, not weak or passive. Blocking."""
+    verb = point.components.action_verb.lower().strip()
+    passed = verb not in WEAK_VERBS
+    return RuleResult(
+        name="strong_action_verb",
+        passed=passed,
+        message=f"Verb '{verb}' is strong." if passed else f"Verb '{verb}' is weak or passive.",
+        suggestion=None if passed else f"The verb '{verb}' is passive. Did you 'Architect', 'Manage', 'Develop', or 'Lead' this instead?",
+        is_blocking=True,
+    )
+
+
+def has_skills_or_flagged(point: CVPoint) -> RuleResult:
+    """Bullet must mention at least one technology or skill. Blocking.
+
+    A CV point with zero skills_utilized is a red flag — either the user
+    forgot to list technologies, or the drafter failed to extract them.
+    """
+    passed = len(point.metadata.skills_utilized) > 0
+    return RuleResult(
+        name="has_skills_or_flagged",
+        passed=passed,
+        message=f"Bullet lists {len(point.metadata.skills_utilized)} skill(s)." if passed else "Bullet has no listed skills or technologies.",
+        suggestion=None if passed else "List the specific technologies, frameworks, languages, or tools used (e.g., ReactJS, Redux, Storybook.js).",
+        is_blocking=True,
+    )
+
+
+# Ordered list of point-level BLOCKING rules.
+# Structural validator enforces hard constraints (format, grammar, metrics, verb strength).
+# The Semantic Prober LLM handles deeper semantic gaps (scope, business linkage, etc.).
 POINT_LEVEL_RULES: List = [
     starts_with_action_verb,
     under_200_chars,
     no_pronouns,
     has_metrics_or_flagged,
+    has_skills_or_flagged,
+    strong_action_verb,
 ]
 
 

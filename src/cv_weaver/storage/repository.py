@@ -7,7 +7,7 @@ All methods accept and return typed Pydantic models.
 import sqlite3
 from typing import List, Optional
 
-from cv_weaver.models.enums import Status
+from cv_weaver.models.enums import GenerationLevel, Status
 from cv_weaver.models.schemas import CVPoint
 
 
@@ -85,6 +85,21 @@ class CVPointRepository:
                 (status.value, point_id),
             )
 
+    def list_by_generation_level(self, level: GenerationLevel) -> List[CVPoint]:
+        """Fetch all CVPoints matching the given generation level.
+
+        Args:
+            level: Either L1 (raw extraction) or L2 (experience-level refined).
+
+        Returns:
+            A list of matching CVPoints.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM cv_points WHERE generation_level = ?",
+            (level.value,),
+        ).fetchall()
+        return [CVPoint.from_sqlite_row(row) for row in rows]
+
     def list_approved_with_embeddings(self) -> List[CVPoint]:
         """Fetch all approved CVPoints that have a pre-computed embedding.
 
@@ -96,6 +111,35 @@ class CVPointRepository:
             (Status.APPROVED.value,),
         ).fetchall()
         return [CVPoint.from_sqlite_row(row) for row in rows]
+
+    def load_approved_embeddings_raw(self) -> List[tuple[str, bytes]]:
+        """Fetch (point_id, embedding_blob) pairs for all approved points.
+
+        Returns:
+            A list of (point_id, embedding_blob) tuples for approved points
+            with non-null embeddings. Used by EmbeddingIndex for fast loading.
+        """
+        rows = self._conn.execute(
+            "SELECT id, embedding FROM cv_points WHERE status = ? AND embedding IS NOT NULL",
+            (Status.APPROVED.value,),
+        ).fetchall()
+        return [(row["id"], row["embedding"]) for row in rows]
+
+    def count_by_source_and_level_status(
+        self,
+        file_id: str,
+        level: GenerationLevel,
+        status: Status,
+    ) -> int:
+        """Count CVPoints for a source file matching a generation level and status.
+
+        Used by the pipeline checkpoint logic to skip already-processed files.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM cv_points WHERE source_file_id = ? AND generation_level = ? AND status = ?",
+            (file_id, level.value, status.value),
+        ).fetchone()
+        return row[0] if row else 0
 
     def update_embedding(self, point_id: str, embedding_blob: bytes) -> None:
         """Store a pre-normalized embedding BLOB for a CVPoint.

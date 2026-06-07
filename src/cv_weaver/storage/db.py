@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS cv_points (
     impact_score INTEGER CHECK (impact_score >= 0 AND impact_score <= 10),
     ats_score INTEGER CHECK (ats_score >= 0 AND ats_score <= 10),
     completeness_score INTEGER CHECK (completeness_score >= 0 AND completeness_score <= 10),
+    generation_level TEXT NOT NULL DEFAULT 'l1' CHECK (generation_level IN ('l1', 'l2')),
     embedding BLOB,
 
     FOREIGN KEY (source_file_id) REFERENCES knowledge_sources(file_id),
@@ -42,6 +43,7 @@ CREATE INDEX IF NOT EXISTS idx_cv_points_status ON cv_points(status);
 CREATE INDEX IF NOT EXISTS idx_cv_points_source ON cv_points(source_file_id);
 CREATE INDEX IF NOT EXISTS idx_cv_points_parent ON cv_points(parent_point_id);
 CREATE INDEX IF NOT EXISTS idx_cv_points_classification ON cv_points(classification_type);
+CREATE INDEX IF NOT EXISTS idx_cv_points_generation_level ON cv_points(generation_level);
 
 -- Knowledge base source files (experience, project, etc.)
 CREATE TABLE IF NOT EXISTS knowledge_sources (

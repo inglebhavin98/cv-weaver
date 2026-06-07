@@ -25,3 +25,8 @@ class Resolution(StrEnum):
     KEPT = "kept"
     DISCARDED = "discarded"
     MERGED = "merged"
+
+
+class GenerationLevel(StrEnum):
+    L1 = "l1"
+    L2 = "l2"
